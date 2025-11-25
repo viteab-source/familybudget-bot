@@ -2,11 +2,11 @@ import asyncio
 import os
 from datetime import datetime
 
-from aiogram import Bot, Dispatcher
+import httpx
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
 from dotenv import load_dotenv
-import httpx
 
 # Загружаем переменные окружения из .env
 load_dotenv()
@@ -14,6 +14,11 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 
+# Для распознавания голоса (пока у нас там 401, но оставляем код как есть)
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
+
+
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С БЭКЕНДОМ ----------
 
 async def api_create_transaction(
     amount: float,
@@ -56,11 +61,69 @@ async def api_parse_and_create(text: str):
         resp = await client.post(
             f"{API_BASE_URL}/transactions/parse-and-create",
             json=payload,
-            timeout=20.0,
+            timeout=30.0,
         )
         resp.raise_for_status()
         return resp.json()
 
+
+# ---------- РАСПОЗНАВАНИЕ ГОЛОСА (ПОКА ПРОБЛЕМА С ПРАВАМИ STT) ----------
+
+async def stt_recognize_ogg(data: bytes, lang: str = "ru-RU") -> str:
+    """
+    Распознаёт речь из OGG/Opus (голосовое Telegram) через Yandex SpeechKit STT v1.
+    Сейчас у нас 401 PermissionDenied, но код оставляем, чтобы потом вернуть.
+    """
+
+    if not YANDEX_API_KEY:
+        raise RuntimeError("YANDEX_API_KEY не найден. Проверь .env")
+
+    print(
+        f"[STT] YANDEX_API_KEY starts with: {YANDEX_API_KEY[:6]}..., "
+        f"len={len(YANDEX_API_KEY)}"
+    )
+
+    url = "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize"
+
+    params = {
+        "lang": lang,
+        "topic": "general",
+        "format": "oggopus",
+    }
+
+    headers = {
+        "Authorization": f"Api-Key {YANDEX_API_KEY}",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            url,
+            params=params,
+            content=data,
+            headers=headers,
+        )
+
+    print(f"[STT] HTTP status: {resp.status_code}")
+    print(f"[STT] Raw body: {resp.text[:300]}")
+
+    if resp.status_code == 401:
+        raise RuntimeError(
+            "STT 401 Unauthorized. "
+            "Проверь YANDEX_API_KEY в .env и роли/область действия API-ключа."
+        )
+
+    resp.raise_for_status()
+    payload = resp.json()
+
+    if payload.get("error_code") is not None:
+        code = payload.get("error_code")
+        msg = payload.get("error_message", "")
+        raise RuntimeError(f"STT error {code}: {msg}")
+
+    return payload.get("result", "")
+
+
+# ---------- ОСНОВНАЯ ЛОГИКА БОТА ----------
 
 async def main():
     if not BOT_TOKEN:
@@ -76,9 +139,9 @@ async def main():
             "Привет! 👋\n"
             "Я FamilyBudget Bot.\n\n"
             "Сейчас я умею:\n"
-            "• /add — добавить расход в формате: /add 2435 Пятёрочка продукты\n"
-            "• /aiadd — добавить расход свободным текстом с ИИ\n"
-            "  пример: /aiadd Пятёрочка продукты 2435₽ вчера\n"
+            "• просто напиши: Перекрёсток продукты 2435₽ вчера — я сам пойму через ИИ\n"
+            "• /aiadd — то же самое, но явно через ИИ\n"
+            "• /add — ручной ввод суммы\n"
             "• /report — отчёт за последние 14 дней\n"
             "• /help — подсказка"
         )
@@ -93,14 +156,16 @@ async def main():
             "/add СУММА описание — добавить расход вручную\n"
             "  пример: /add 2435 Пятёрочка продукты\n\n"
             "/aiadd ТЕКСТ — добавить расход через ИИ (YandexGPT)\n"
-            "  пример: /aiadd Пятёрочка продукты 2435₽ вчера\n\n"
+            "  пример: /aiadd Перекрёсток продукты 2435₽ вчера\n\n"
+            "Просто текстом (без команды):\n"
+            "  Перекрёсток продукты 2435₽ вчера\n"
+            "  Перекрёсток, продукты, две тысячи четыреста тридцать пять рублей, вчера\n\n"
             "/report — отчёт за последние 14 дней"
         )
 
-    # /add СУММА описание
+    # /add — ручной формат: /add 2435 Пятёрочка продукты
     @dp.message(Command("add"))
     async def cmd_add(message: Message):
-        """Простой формат: /add СУММА описание."""
         text = message.text or ""
         parts = text.split(maxsplit=2)  # ['/add', '2435', 'Пятёрочка продукты']
 
@@ -149,21 +214,21 @@ async def main():
             f"Описание: {desc_text}"
         )
 
-    # /aiadd свободный текст → ИИ
+    # /aiadd — умный ввод через ИИ
     @dp.message(Command("aiadd"))
     async def cmd_aiadd(message: Message):
         """
-        Умный ввод: /aiadd Пятёрочка продукты 2435₽ вчера
+        Умный ввод: /aiadd Перекрёсток продукты 2435₽ вчера
         Текст после команды отправляем в YandexGPT.
         """
         text = message.text or ""
-        parts = text.split(maxsplit=1)  # ['/aiadd', 'Пятёрочка продукты 2435₽ вчера']
+        parts = text.split(maxsplit=1)  # ['/aiadd', 'Перекрёсток продукты 2435₽ вчера']
 
         if len(parts) < 2:
             await message.answer(
                 "Напиши расход после команды.\n\n"
                 "Пример:\n"
-                "/aiadd Пятёрочка продукты 2435₽ вчера"
+                "/aiadd Перекрёсток продукты 2435₽ вчера"
             )
             return
 
@@ -172,40 +237,16 @@ async def main():
         try:
             tx = await api_parse_and_create(raw_text)
         except Exception as e:
-            print(f"Ошибка при разборе через ИИ: {e}")
+            print(f"Ошибка при разборе свободного текста через ИИ: {e}")
             await message.answer(
                 "Не получилось разобрать расход через ИИ 😔\n"
                 "Попробуй ещё раз или используй /add."
             )
             return
 
-        amount = tx.get("amount")
-        currency = tx.get("currency", "RUB")
-        description = tx.get("description") or raw_text
-        category = tx.get("category") or "Без категории"
-        date_raw = tx.get("date")
+        await send_tx_confirmation(message, tx, raw_text, via_ai=True)
 
-        # Приводим дату к формату 26.09.2024
-        pretty_date = None
-        if date_raw:
-            try:
-                pretty_date = datetime.fromisoformat(date_raw).strftime("%d.%m.%Y")
-            except ValueError:
-                # если вдруг формат странный – покажем как есть
-                pretty_date = date_raw
-
-        msg_lines = [
-            "Записал расход через ИИ:",
-            f"{amount} {currency}",
-            f"Категория: {category}",
-            f"Описание: {description}",
-        ]
-        if pretty_date:
-            msg_lines.append(f"Дата: {pretty_date}")
-
-        await message.answer("\n".join(msg_lines))
-
-    # /report
+    # /report — отчёт по последним 14 дням
     @dp.message(Command("report"))
     async def cmd_report(message: Message):
         days = 14
@@ -244,62 +285,133 @@ async def main():
             lines.append(f"- {cat}: {amt:.2f} {currency}")
 
         await message.answer("\n".join(lines))
-        # Любое текстовое сообщение без команды -> пробуем разобрать как расход через ИИ
+
+    # Голосовые — пока пытаемся, но из-за 401 может не работать
+    @dp.message(F.voice)
+    async def handle_voice(message: Message):
+        await message.answer("Секунду, распознаю голос и запишу расход... 🎧")
+
+        # 1) скачиваем голосовое из Telegram
+        try:
+            file = await bot.get_file(message.voice.file_id)
+            file_path = file.file_path
+            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                voice_resp = await client.get(file_url)
+                voice_resp.raise_for_status()
+                ogg_data = voice_resp.content
+        except Exception as e:
+            print(f"Ошибка при скачивании голосового: {e}")
+            await message.answer(
+                "Не получилось скачать голосовое сообщение 😔\n"
+                "Попробуй ещё раз или напиши текстом."
+            )
+            return
+
+        # 2) STT → текст
+        try:
+            stt_text = await stt_recognize_ogg(ogg_data)
+        except Exception as e:
+            print(f"Ошибка STT: {e}")
+            await message.answer(
+                "Не получилось распознать голос 😔\n"
+                "Попробуй ещё раз или напиши текстом."
+            )
+            return
+
+        if not stt_text.strip():
+            await message.answer(
+                "Не разобрал, что сказано в голосовом 😔\n"
+                "Попробуй ещё раз или напиши текстом."
+            )
+            return
+
+        # 3) Текст → транзакция через ИИ
+        try:
+            tx = await api_parse_and_create(stt_text)
+        except Exception as e:
+            print(f"Ошибка при разборе текста из голосового через ИИ: {e}")
+            await message.answer(
+                "Голос распознал, но не получилось понять расход через ИИ 😔\n"
+                "Попробуй ещё раз или напиши текстом."
+            )
+            return
+
+        await send_tx_confirmation(
+            message,
+            tx,
+            stt_text,
+            via_ai=True,
+            prefix="Распознал голос и записал расход через ИИ:",
+        )
+
+    # ---- НОВОЕ: ЛЮБОЙ ПРОСТОЙ ТЕКСТ -> ИИ (как /aiadd) ----
     @dp.message()
     async def handle_free_text(message: Message):
         text = (message.text or "").strip()
-
-        # Если сообщение пустое или это команда (начинается с "/") — пропускаем
-        if not text or text.startswith("/"):
+        if not text:
             return
 
-        # Можно чуть подфильтровать, чтобы не пытаться разбирать "привет", "ок" и т.п.
-        # Например, если нет ни цифр, ни знаков валюты — считаем, что это не расход.
-        has_digit = any(ch.isdigit() for ch in text)
-        has_currency_sign = any(sym in text for sym in ["₽", "€", "$"])
-        if not has_digit and not has_currency_sign:
-            # Просто игнорируем или отвечаем нейтрально
-            # Можно ничего не писать, чтобы не спамить
+        # Команды (начинаются с "/") сюда не должны попадать
+        if text.startswith("/"):
             return
 
+        # Можно не спамить лишним текстом, а сразу ответить результатом.
         try:
             tx = await api_parse_and_create(text)
         except Exception as e:
             print(f"Ошибка при разборе свободного текста через ИИ: {e}")
             await message.answer(
-                "Не получилось разобрать расход через ИИ 😔\n"
-                "Попробуй ещё раз, или используй /add или /aiadd."
+                "Не получилось разобрать это сообщение как расход 😔\n"
+                "Можешь попробовать ещё раз или использовать команду /aiadd."
             )
             return
 
-        amount = tx.get("amount")
-        currency = tx.get("currency", "RUB")
-        description = tx.get("description") or text
-        category = tx.get("category") or "Без категории"
-        date_raw = tx.get("date")
-
-        # Приводим дату к формату 26.09.2025
-        pretty_date = None
-        if date_raw:
-            try:
-                pretty_date = datetime.fromisoformat(date_raw).strftime("%d.%m.%Y")
-            except ValueError:
-                pretty_date = date_raw
-
-        msg_lines = [
-            "Записал расход:",
-            f"{amount} {currency}",
-            f"Категория: {category}",
-            f"Описание: {description}",
-        ]
-        if pretty_date:
-            msg_lines.append(f"Дата: {pretty_date}")
-
-        await message.answer("\n".join(msg_lines))
-
+        await send_tx_confirmation(message, tx, text, via_ai=True)
 
     print("Бот запущен. Нажми Ctrl+C, чтобы остановить.")
     await dp.start_polling(bot)
+
+
+async def send_tx_confirmation(
+    message: Message,
+    tx: dict,
+    source_text: str,
+    via_ai: bool = False,
+    prefix: str | None = None,
+):
+    """Формирует красивый ответ про записанный расход."""
+    amount = tx.get("amount")
+    currency = tx.get("currency", "RUB")
+    description = tx.get("description") or source_text
+    category = tx.get("category") or "Без категории"
+    date_raw = tx.get("date")
+
+    pretty_date = None
+    if date_raw:
+        try:
+            pretty_date = datetime.fromisoformat(date_raw).strftime("%d.%m.%Y")
+        except ValueError:
+            pretty_date = date_raw
+
+    lines = []
+
+    if prefix:
+        lines.append(prefix)
+    else:
+        if via_ai:
+            lines.append("Записал расход через ИИ:")
+        else:
+            lines.append("Записал расход:")
+
+    lines.append(f"{amount} {currency}")
+    lines.append(f"Категория: {category}")
+    lines.append(f"Описание: {description}")
+    if pretty_date:
+        lines.append(f"Дата: {pretty_date}")
+
+    await message.answer("\n".join(lines))
 
 
 if __name__ == "__main__":
