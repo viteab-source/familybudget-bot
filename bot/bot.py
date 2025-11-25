@@ -19,7 +19,7 @@ async def api_create_transaction(
     description: str | None = None,
     category: str | None = None,
 ):
-    """Отправляем запрос в backend для создания транзакции."""
+    """Прямое создание транзакции через /transactions."""
     async with httpx.AsyncClient() as client:
         payload = {
             "amount": amount,
@@ -37,12 +37,25 @@ async def api_create_transaction(
 
 
 async def api_get_report(days: int = 14):
-    """Запрашиваем краткий отчёт из backend."""
+    """Краткий отчёт через /report/summary."""
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{API_BASE_URL}/report/summary",
             params={"days": days},
             timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def api_parse_and_create(text: str):
+    """Разбор свободного текста через YandexGPT + создание транзакции."""
+    async with httpx.AsyncClient() as client:
+        payload = {"text": text}
+        resp = await client.post(
+            f"{API_BASE_URL}/transactions/parse-and-create",
+            json=payload,
+            timeout=20.0,
         )
         resp.raise_for_status()
         return resp.json()
@@ -60,10 +73,12 @@ async def main():
         await message.answer(
             "Привет! 👋\n"
             "Я FamilyBudget Bot.\n\n"
-            "Пока я умею:\n"
-            "- /add — добавить расход (простой формат)\n"
-            "- /report — отчёт за 14 дней\n"
-            "- /help — подсказка"
+            "Сейчас я умею:\n"
+            "• /add — добавить расход в формате: /add 2435 Пятёрочка продукты\n"
+            "• /aiadd — добавить расход свободным текстом с ИИ\n"
+            "  пример: /aiadd Пятёрочка продукты 2435₽ вчера\n"
+            "• /report — отчёт за последние 14 дней\n"
+            "• /help — подсказка"
         )
 
     @dp.message(Command("help"))
@@ -72,8 +87,10 @@ async def main():
             "Доступные команды:\n"
             "/start — начать работу\n"
             "/help — помощь\n\n"
-            "/add СУММА описание — добавить расход\n"
+            "/add СУММА описание — добавить расход вручную\n"
             "  пример: /add 2435 Пятёрочка продукты\n\n"
+            "/aiadd ТЕКСТ — добавить расход через ИИ (YandexGPT)\n"
+            "  пример: /aiadd Пятёрочка продукты 2435₽ вчера\n\n"
             "/report — отчёт за последние 14 дней"
         )
 
@@ -128,6 +145,52 @@ async def main():
             f"Описание: {desc_text}"
         )
 
+    @dp.message(Command("aiadd"))
+    async def cmd_aiadd(message: Message):
+        """
+        Умный ввод: /aiadd Пятёрочка продукты 2435₽ вчера
+        Текст после команды отправляем в YandexGPT.
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=1)  # ['/aiadd', 'Пятёрочка продукты 2435₽ вчера']
+
+        if len(parts) < 2:
+            await message.answer(
+                "Напиши расход после команды.\n\n"
+                "Пример:\n"
+                "/aiadd Пятёрочка продукты 2435₽ вчера"
+            )
+            return
+
+        raw_text = parts[1]
+
+        try:
+            tx = await api_parse_and_create(raw_text)
+        except Exception as e:
+            print(f"Ошибка при разборе через ИИ: {e}")
+            await message.answer(
+                "Не получилось разобрать расход через ИИ 😔\n"
+                "Попробуй ещё раз или используй /add."
+            )
+            return
+
+        amount = tx.get("amount")
+        currency = tx.get("currency", "RUB")
+        description = tx.get("description") or raw_text
+        category = tx.get("category") or "Без категории"
+        date = tx.get("date")
+
+        msg_lines = [
+            "Записал расход через ИИ:",
+            f"{amount} {currency}",
+            f"Категория: {category}",
+            f"Описание: {description}",
+        ]
+        if date:
+            msg_lines.append(f"Дата: {date}")
+
+        await message.answer("\n".join(msg_lines))
+
     @dp.message(Command("report"))
     async def cmd_report(message: Message):
         days = 14
@@ -149,7 +212,7 @@ async def main():
         if not by_cat and total == 0:
             await message.answer(
                 "Пока нет расходов за этот период 🙂\n"
-                "Добавь расход через /add"
+                "Добавь расход через /add или /aiadd"
             )
             return
 
