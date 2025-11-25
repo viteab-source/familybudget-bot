@@ -1,5 +1,6 @@
 import asyncio
 import os
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart, Command
@@ -68,6 +69,7 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
 
+    # /start
     @dp.message(CommandStart())
     async def cmd_start(message: Message):
         await message.answer(
@@ -81,6 +83,7 @@ async def main():
             "• /help — подсказка"
         )
 
+    # /help
     @dp.message(Command("help"))
     async def cmd_help(message: Message):
         await message.answer(
@@ -94,6 +97,7 @@ async def main():
             "/report — отчёт за последние 14 дней"
         )
 
+    # /add СУММА описание
     @dp.message(Command("add"))
     async def cmd_add(message: Message):
         """Простой формат: /add СУММА описание."""
@@ -145,6 +149,7 @@ async def main():
             f"Описание: {desc_text}"
         )
 
+    # /aiadd свободный текст → ИИ
     @dp.message(Command("aiadd"))
     async def cmd_aiadd(message: Message):
         """
@@ -178,7 +183,16 @@ async def main():
         currency = tx.get("currency", "RUB")
         description = tx.get("description") or raw_text
         category = tx.get("category") or "Без категории"
-        date = tx.get("date")
+        date_raw = tx.get("date")
+
+        # Приводим дату к формату 26.09.2024
+        pretty_date = None
+        if date_raw:
+            try:
+                pretty_date = datetime.fromisoformat(date_raw).strftime("%d.%m.%Y")
+            except ValueError:
+                # если вдруг формат странный – покажем как есть
+                pretty_date = date_raw
 
         msg_lines = [
             "Записал расход через ИИ:",
@@ -186,11 +200,12 @@ async def main():
             f"Категория: {category}",
             f"Описание: {description}",
         ]
-        if date:
-            msg_lines.append(f"Дата: {date}")
+        if pretty_date:
+            msg_lines.append(f"Дата: {pretty_date}")
 
         await message.answer("\n".join(msg_lines))
 
+    # /report
     @dp.message(Command("report"))
     async def cmd_report(message: Message):
         days = 14
@@ -229,6 +244,59 @@ async def main():
             lines.append(f"- {cat}: {amt:.2f} {currency}")
 
         await message.answer("\n".join(lines))
+        # Любое текстовое сообщение без команды -> пробуем разобрать как расход через ИИ
+    @dp.message()
+    async def handle_free_text(message: Message):
+        text = (message.text or "").strip()
+
+        # Если сообщение пустое или это команда (начинается с "/") — пропускаем
+        if not text or text.startswith("/"):
+            return
+
+        # Можно чуть подфильтровать, чтобы не пытаться разбирать "привет", "ок" и т.п.
+        # Например, если нет ни цифр, ни знаков валюты — считаем, что это не расход.
+        has_digit = any(ch.isdigit() for ch in text)
+        has_currency_sign = any(sym in text for sym in ["₽", "€", "$"])
+        if not has_digit and not has_currency_sign:
+            # Просто игнорируем или отвечаем нейтрально
+            # Можно ничего не писать, чтобы не спамить
+            return
+
+        try:
+            tx = await api_parse_and_create(text)
+        except Exception as e:
+            print(f"Ошибка при разборе свободного текста через ИИ: {e}")
+            await message.answer(
+                "Не получилось разобрать расход через ИИ 😔\n"
+                "Попробуй ещё раз, или используй /add или /aiadd."
+            )
+            return
+
+        amount = tx.get("amount")
+        currency = tx.get("currency", "RUB")
+        description = tx.get("description") or text
+        category = tx.get("category") or "Без категории"
+        date_raw = tx.get("date")
+
+        # Приводим дату к формату 26.09.2025
+        pretty_date = None
+        if date_raw:
+            try:
+                pretty_date = datetime.fromisoformat(date_raw).strftime("%d.%m.%Y")
+            except ValueError:
+                pretty_date = date_raw
+
+        msg_lines = [
+            "Записал расход:",
+            f"{amount} {currency}",
+            f"Категория: {category}",
+            f"Описание: {description}",
+        ]
+        if pretty_date:
+            msg_lines.append(f"Дата: {pretty_date}")
+
+        await message.answer("\n".join(msg_lines))
+
 
     print("Бот запущен. Нажми Ctrl+C, чтобы остановить.")
     await dp.start_polling(bot)
