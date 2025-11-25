@@ -2,4 +2,7 @@ fastapi
 uvicorn[standard]
 aiogram==3.*
 python-dotenv
+SQLAlchemy
+psycopg[binary]
+python-dotenv
 
