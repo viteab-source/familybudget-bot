@@ -32,3 +32,6 @@ class ReportSummary(BaseModel):
     total_amount: float
     currency: str
     by_category: list[CategorySummary]
+
+class ParseTextRequest(BaseModel):
+    text: str

@@ -7,6 +7,9 @@ from sqlalchemy.orm import Session
 from .db import Base, engine, SessionLocal, get_db
 from . import models, schemas
 
+from .ai import parse_text_to_transaction
+
+
 app = FastAPI(title="FamilyBudget API")
 
 
@@ -135,3 +138,73 @@ def report_summary(
         currency=currency,
         by_category=by_category,
     )
+
+@app.post("/transactions/parse-and-create", response_model=schemas.TransactionRead)
+def parse_and_create_transaction(
+    body: schemas.ParseTextRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Принимает сырой текст (типа "Пятёрочка продукты 2435₽ вчера"),
+    вызывает YandexGPT, создаёт транзакцию и возвращает её.
+    """
+
+    # 1. Парсим текст через YandexGPT
+    try:
+        parsed = parse_text_to_transaction(body.text)
+    except Exception as e:
+        # Если что-то пошло не так с ИИ — вернём 400
+        raise HTTPException(status_code=400, detail=f"AI parse error: {e}")
+
+    # 2. Достаём поля из ответа
+    try:
+        amount = float(parsed["amount"])
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Некорректная сумма в ответе ИИ: {parsed!r}")
+
+    currency = parsed.get("currency") or "RUB"
+    description = parsed.get("description") or body.text
+    category = parsed.get("category")
+
+    # Дата: пытаемся прочитать, если нет — сейчас
+    date_str = parsed.get("date")
+    if date_str:
+        try:
+            date = datetime.fromisoformat(date_str)
+        except ValueError:
+            date = datetime.utcnow()
+    else:
+        date = datetime.utcnow()
+
+    # 3. Берём (или создаём) дефолтное household
+    household = db.query(models.Household).first()
+    if household is None:
+        household = models.Household(
+            name="Default family",
+            currency="RUB",
+            privacy_mode="OPEN",
+        )
+        db.add(household)
+        db.commit()
+        db.refresh(household)
+
+    # 4. Создаём транзакцию
+    db_tx = models.Transaction(
+        household_id=household.id,
+        user_id=None,  # позже привяжем к конкретному юзеру
+        amount=amount,
+        currency=currency,
+        description=description,
+        category=category,
+        date=date,
+    )
+
+    try:
+        db.add(db_tx)
+        db.commit()
+        db.refresh(db_tx)
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+
+    return db_tx
