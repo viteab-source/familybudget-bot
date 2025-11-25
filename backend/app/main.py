@@ -1,14 +1,13 @@
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy import func
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from .db import Base, engine, SessionLocal, get_db
 from . import models, schemas
-
 from .ai import parse_text_to_transaction
-
 
 app = FastAPI(title="FamilyBudget API")
 
@@ -38,6 +37,9 @@ def on_startup():
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+# ---------- ТРАНЗАКЦИИ ----------
 
 
 @app.post("/transactions", response_model=schemas.TransactionRead)
@@ -139,6 +141,7 @@ def report_summary(
         by_category=by_category,
     )
 
+
 @app.post("/transactions/parse-and-create", response_model=schemas.TransactionRead)
 def parse_and_create_transaction(
     body: schemas.ParseTextRequest,
@@ -148,7 +151,6 @@ def parse_and_create_transaction(
     Принимает сырой текст (типа "Пятёрочка продукты 2435₽ вчера"),
     вызывает YandexGPT, создаёт транзакцию и возвращает её.
     """
-
     # 1. Парсим текст через YandexGPT
     try:
         parsed = parse_text_to_transaction(body.text)
@@ -160,7 +162,10 @@ def parse_and_create_transaction(
     try:
         amount = float(parsed["amount"])
     except Exception:
-        raise HTTPException(status_code=400, detail=f"Некорректная сумма в ответе ИИ: {parsed!r}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Некорректная сумма в ответе ИИ: {parsed!r}",
+        )
 
     currency = parsed.get("currency") or "RUB"
     description = parsed.get("description") or body.text
@@ -208,3 +213,125 @@ def parse_and_create_transaction(
         raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
     return db_tx
+
+
+# ---------- REMINDERS (НАПОМИНАНИЯ) ----------
+
+
+@app.post("/reminders", response_model=schemas.ReminderRead)
+def create_reminder(
+    reminder: schemas.ReminderCreate,
+    db: Session = Depends(get_db),
+):
+    """
+    Создаёт напоминание.
+    Если next_run_at не передали — поставим сегодня.
+    """
+    next_run = reminder.next_run_at or datetime.utcnow()
+
+    db_rem = models.Reminder(
+        title=reminder.title,
+        amount=reminder.amount,
+        currency=reminder.currency,
+        interval_days=reminder.interval_days,
+        next_run_at=next_run,
+    )
+    db.add(db_rem)
+    db.commit()
+    db.refresh(db_rem)
+    return db_rem
+
+
+@app.get("/reminders", response_model=list[schemas.ReminderRead])
+def list_reminders(
+    only_active: bool = True,
+    db: Session = Depends(get_db),
+):
+    """
+    Список напоминаний.
+    Параметр only_active=true — только активные.
+    """
+    query = db.query(models.Reminder)
+    if only_active:
+        query = query.filter(models.Reminder.is_active == True)  # noqa: E712
+
+    reminders = (
+        query.order_by(models.Reminder.next_run_at.asc().nullslast()).all()
+    )
+    return reminders
+
+@app.get("/reminders/due-today", response_model=list[schemas.ReminderRead])
+def reminders_due_today(
+    db: Session = Depends(get_db),
+):
+    """
+    Напоминания, которые уже наступили:
+    next_run_at <= сегодня, is_active = true.
+    """
+    today = datetime.utcnow().date()
+
+    reminders = (
+        db.query(models.Reminder)
+        .filter(models.Reminder.is_active == True)  # noqa: E712
+        .filter(models.Reminder.next_run_at != None)  # noqa: E711
+        .filter(func.date(models.Reminder.next_run_at) <= today)
+        .order_by(models.Reminder.next_run_at.asc())
+        .all()
+    )
+
+    return reminders
+
+
+@app.post("/reminders/{reminder_id}/mark-paid", response_model=schemas.ReminderRead)
+def mark_reminder_paid(
+    reminder_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Отмечаем напоминание как оплачено:
+    - создаём транзакцию (если есть сумма)
+    - сдвигаем next_run_at на interval_days, либо деактивируем напоминание
+    """
+    rem: models.Reminder | None = (
+        db.query(models.Reminder)
+        .filter(models.Reminder.id == reminder_id)
+        .first()
+    )
+    if not rem:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+
+    # 0) берём (или создаём) дефолтную семью — как в create_transaction
+    household = db.query(models.Household).first()
+    if household is None:
+        household = models.Household(
+            name="Default family",
+            currency="RUB",
+            privacy_mode="OPEN",
+        )
+        db.add(household)
+        db.commit()
+        db.refresh(household)
+
+    # 1) создаём транзакцию, если указана сумма
+    if rem.amount:
+        tx = models.Transaction(
+            household_id=household.id,
+            user_id=None,
+            amount=rem.amount,
+            currency=rem.currency,
+            description=rem.title,
+            category="Плановый платеж",
+            date=datetime.utcnow(),
+        )
+        db.add(tx)
+
+    # 2) обновляем next_run_at или выключаем напоминание
+    if rem.interval_days:
+        base_date = rem.next_run_at or datetime.utcnow()
+        rem.next_run_at = base_date + timedelta(days=rem.interval_days)
+    else:
+        rem.is_active = False
+
+    db.commit()
+    db.refresh(rem)
+    return rem

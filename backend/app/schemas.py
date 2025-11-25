@@ -35,3 +35,29 @@ class ReportSummary(BaseModel):
 
 class ParseTextRequest(BaseModel):
     text: str
+
+from datetime import datetime
+from pydantic import BaseModel
+
+
+class ReminderBase(BaseModel):
+    title: str
+    amount: float | None = None
+    currency: str = "RUB"
+    interval_days: int | None = None
+    next_run_at: datetime | None = None
+
+
+class ReminderCreate(ReminderBase):
+    """То, что приходит от бота при создании напоминания."""
+    pass
+
+
+class ReminderRead(ReminderBase):
+    """То, что отдаём наружу (в т.ч. в бота)."""
+    id: int
+    is_active: bool
+    created_at: datetime
+
+    class Config:
+        orm_mode = True

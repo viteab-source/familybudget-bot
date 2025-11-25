@@ -20,6 +20,7 @@ YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
 # ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С БЭКЕНДОМ ----------
 
+
 async def api_create_transaction(
     amount: float,
     description: str | None = None,
@@ -67,14 +68,71 @@ async def api_parse_and_create(text: str):
         return resp.json()
 
 
+async def api_create_reminder(
+    title: str,
+    amount: float | None,
+    interval_days: int | None,
+):
+    """Создать напоминание через /reminders."""
+    async with httpx.AsyncClient() as client:
+        payload = {
+            "title": title,
+            "amount": amount,
+            "currency": "RUB",
+            "interval_days": interval_days,
+            "next_run_at": None,
+        }
+        resp = await client.post(
+            f"{API_BASE_URL}/reminders",
+            json=payload,
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def api_list_reminders():
+    """Получить список активных напоминаний."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{API_BASE_URL}/reminders",
+            params={"only_active": True},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def api_get_due_reminders():
+    """Получить напоминания, которые нужно оплатить сегодня (и просроченные)."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{API_BASE_URL}/reminders/due-today",
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def api_mark_reminder_paid(reminder_id: int):
+    """Отметить напоминание как оплачено."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{API_BASE_URL}/reminders/{reminder_id}/mark-paid",
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 # ---------- РАСПОЗНАВАНИЕ ГОЛОСА (ПОКА ПРОБЛЕМА С ПРАВАМИ STT) ----------
+
 
 async def stt_recognize_ogg(data: bytes, lang: str = "ru-RU") -> str:
     """
     Распознаёт речь из OGG/Opus (голосовое Telegram) через Yandex SpeechKit STT v1.
     Сейчас у нас 401 PermissionDenied, но код оставляем, чтобы потом вернуть.
     """
-
     if not YANDEX_API_KEY:
         raise RuntimeError("YANDEX_API_KEY не найден. Проверь .env")
 
@@ -125,6 +183,7 @@ async def stt_recognize_ogg(data: bytes, lang: str = "ru-RU") -> str:
 
 # ---------- ОСНОВНАЯ ЛОГИКА БОТА ----------
 
+
 async def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN не найден. Проверь файл .env")
@@ -143,6 +202,10 @@ async def main():
             "• /aiadd — то же самое, но явно через ИИ\n"
             "• /add — ручной ввод суммы\n"
             "• /report — отчёт за последние 14 дней\n"
+            "• /remind_add — создать напоминание\n"
+            "• /reminders — список напоминаний\n"
+            "• /remind_today — что нужно оплатить сегодня\n"
+            "• /remind_pay — отметить напоминание как оплачено\n"
             "• /help — подсказка"
         )
 
@@ -160,7 +223,13 @@ async def main():
             "Просто текстом (без команды):\n"
             "  Перекрёсток продукты 2435₽ вчера\n"
             "  Перекрёсток, продукты, две тысячи четыреста тридцать пять рублей, вчера\n\n"
-            "/report — отчёт за последние 14 дней"
+            "/report — отчёт за последние 14 дней\n\n"
+            "Напоминания:\n"
+            "/remind_add НАЗВАНИЕ СУММА ДНЕЙ\n"
+            "  пример: /remind_add Коммуналка 8000 30\n"
+            "/reminders — список активных напоминаний\n"
+            "/remind_today — список платежей на сегодня\n"
+            "/remind_pay ID — отметить напоминание как оплачено"
         )
 
     # /add — ручной формат: /add 2435 Пятёрочка продукты
@@ -213,6 +282,220 @@ async def main():
             f"Записал расход: {amount_saved} {currency}\n"
             f"Описание: {desc_text}"
         )
+
+    # /remind_add — создать напоминание
+    @dp.message(Command("remind_add"))
+    async def cmd_remind_add(message: Message):
+        """
+        Создать напоминание.
+        Формат: /remind_add НАЗВАНИЕ СУММА ДНЕЙ
+        Пример: /remind_add Коммуналка 8000 30
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=3)  # ['/remind_add', 'Коммуналка', '8000', '30']
+
+        if len(parts) < 4:
+            await message.answer(
+                "Формат команды:\n"
+                "/remind_add НАЗВАНИЕ СУММА ДНЕЙ\n\n"
+                "Пример:\n"
+                "/remind_add Коммуналка 8000 30"
+            )
+            return
+
+        title = parts[1]
+        amount_str = parts[2]
+        days_str = parts[3]
+
+        try:
+            amount = float(amount_str.replace(",", "."))
+        except ValueError:
+            await message.answer(
+                "Не понял сумму 🤔\n"
+                "Пример: /remind_add Коммуналка 8000 30"
+            )
+            return
+
+        try:
+            interval_days = int(days_str)
+        except ValueError:
+            await message.answer(
+                "Не понял, через сколько дней повторять.\n"
+                "Пример: /remind_add Коммуналка 8000 30"
+            )
+            return
+
+        try:
+            rem = await api_create_reminder(title, amount, interval_days)
+        except Exception as e:
+            print(f"Ошибка при создании напоминания: {e}")
+            await message.answer(
+                "Не получилось создать напоминание 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        next_date_raw = rem.get("next_run_at")
+        pretty_date = None
+        if next_date_raw:
+            try:
+                pretty_date = datetime.fromisoformat(next_date_raw).strftime("%d.%m.%Y")
+            except ValueError:
+                pretty_date = next_date_raw
+
+        msg = [
+            "Создал напоминание ✅",
+            f"ID: {rem.get('id')}",
+            f"Название: {rem.get('title')}",
+            f"Сумма: {rem.get('amount')} {rem.get('currency')}",
+            f"Каждые {rem.get('interval_days')} дней",
+        ]
+        if pretty_date:
+            msg.append(f"Следующий раз: {pretty_date}")
+
+        await message.answer("\n".join(msg))
+
+    # /reminders — список активных напоминаний
+    @dp.message(Command("reminders"))
+    async def cmd_reminders(message: Message):
+        try:
+            reminders = await api_list_reminders()
+        except Exception as e:
+            print(f"Ошибка при получении списка напоминаний: {e}")
+            await message.answer(
+                "Не получилось получить напоминания 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        if not reminders:
+            await message.answer(
+                "Пока нет активных напоминаний 🙂\n"
+                "Создай первое через /remind_add"
+            )
+            return
+
+        lines = ["Активные напоминания:"]
+        for rem in reminders:
+            next_date_raw = rem.get("next_run_at")
+            pretty_date = None
+            if next_date_raw:
+                try:
+                    pretty_date = datetime.fromisoformat(next_date_raw).strftime(
+                        "%d.%m.%Y"
+                    )
+                except ValueError:
+                    pretty_date = next_date_raw
+
+            line = (
+                f"[{rem.get('id')}] {rem.get('title')} — "
+                f"{rem.get('amount')} {rem.get('currency')}"
+            )
+            if rem.get("interval_days"):
+                line += f", каждые {rem.get('interval_days')} дней"
+            if pretty_date:
+                line += f", следующий раз: {pretty_date}"
+
+            lines.append(line)
+
+        await message.answer("\n".join(lines))
+
+    # /remind_today — что нужно оплатить сегодня
+    @dp.message(Command("remind_today"))
+    async def cmd_remind_today(message: Message):
+        """
+        Показать, что нужно оплатить сегодня (и всё, что уже просрочено).
+        """
+        try:
+            reminders = await api_get_due_reminders()
+        except Exception as e:
+            print(f"Ошибка при получении сегодняшних напоминаний: {e}")
+            await message.answer(
+                "Не получилось получить сегодняшние напоминания 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        if not reminders:
+            await message.answer("На сегодня нет обязательных платежей ✅")
+            return
+
+        lines = ["Сегодня нужно оплатить:"]
+        for rem in reminders:
+            line = (
+                f"[{rem.get('id')}] {rem.get('title')} — "
+                f"{rem.get('amount')} {rem.get('currency')}"
+            )
+            if rem.get("interval_days"):
+                line += f", каждые {rem.get('interval_days')} дней"
+            lines.append(line)
+
+        lines.append(
+            "\nЧтобы отметить оплату, используй /remind_pay ID "
+            "(например, /remind_pay 1)."
+        )
+
+        await message.answer("\n".join(lines))
+
+    # /remind_pay — отметить напоминание как оплачено
+    @dp.message(Command("remind_pay"))
+    async def cmd_remind_pay(message: Message):
+        """
+        Отметить напоминание как оплачено.
+        Формат: /remind_pay ID
+        Пример: /remind_pay 1
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=1)  # ['/remind_pay', '1']
+
+        if len(parts) < 2:
+            await message.answer(
+                "Формат команды:\n"
+                "/remind_pay ID\n\n"
+                "Пример:\n"
+                "/remind_pay 1"
+            )
+            return
+
+        try:
+            rem_id = int(parts[1])
+        except ValueError:
+            await message.answer("ID должен быть числом. Пример: /remind_pay 1")
+            return
+
+        try:
+            rem = await api_mark_reminder_paid(rem_id)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                await message.answer("Напоминание с таким ID не найдено 😔")
+                return
+            print(f"HTTP ошибка при отметке напоминания: {e}")
+            await message.answer("Не получилось обновить напоминание 😔 Попробуй позже.")
+            return
+        except Exception as e:
+            print(f"Ошибка при отметке напоминания: {e}")
+            await message.answer("Не получилось обновить напоминание 😔 Попробуй позже.")
+            return
+
+        next_date_raw = rem.get("next_run_at")
+        pretty_date = None
+        if next_date_raw and rem.get("is_active"):
+            try:
+                pretty_date = datetime.fromisoformat(next_date_raw).strftime("%d.%m.%Y")
+            except ValueError:
+                pretty_date = next_date_raw
+
+        msg = [
+            "Отметил напоминание как оплачено ✅",
+            f"Название: {rem.get('title')}",
+            f"Сумма: {rem.get('amount')} {rem.get('currency')}",
+        ]
+        if rem.get("interval_days") and pretty_date:
+            msg.append(f"Следующий платёж: {pretty_date}")
+        if not rem.get("interval_days"):
+            msg.append("Напоминание одноразовое и теперь отключено.")
+
+        await message.answer("\n".join(msg))
 
     # /aiadd — умный ввод через ИИ
     @dp.message(Command("aiadd"))
@@ -346,7 +629,7 @@ async def main():
             prefix="Распознал голос и записал расход через ИИ:",
         )
 
-    # ---- НОВОЕ: ЛЮБОЙ ПРОСТОЙ ТЕКСТ -> ИИ (как /aiadd) ----
+    # ---- ЛЮБОЙ ПРОСТОЙ ТЕКСТ -> ИИ (как /aiadd) ----
     @dp.message()
     async def handle_free_text(message: Message):
         text = (message.text or "").strip()
@@ -357,7 +640,6 @@ async def main():
         if text.startswith("/"):
             return
 
-        # Можно не спамить лишним текстом, а сразу ответить результатом.
         try:
             tx = await api_parse_and_create(text)
         except Exception as e:

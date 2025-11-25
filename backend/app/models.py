@@ -65,3 +65,27 @@ class Transaction(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     household = relationship("Household", back_populates="transactions")
+
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean
+from sqlalchemy.sql import func
+
+from .db import Base
+
+
+class Reminder(Base):
+    __tablename__ = "reminders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)          # Название: "Коммуналка", "Садик" и т.п.
+    amount = Column(Float, nullable=True)           # Сумма платежа (можно не задавать)
+    currency = Column(String(3), nullable=False, default="RUB")
+
+    # Через сколько дней повторять (30 — раз в ~месяц, 7 — раз в неделю и т.д.)
+    interval_days = Column(Integer, nullable=True)
+
+    # Когда в следующий раз напомнить
+    next_run_at = Column(DateTime(timezone=True), nullable=True)
+
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
