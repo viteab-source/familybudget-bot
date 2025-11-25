@@ -22,3 +22,13 @@ class TransactionRead(TransactionBase):
 
     # Разрешаем Pydantic создавать модель из ORM-объекта SQLAlchemy
     model_config = ConfigDict(from_attributes=True)
+    
+class CategorySummary(BaseModel):
+    category: str | None = None
+    amount: float
+
+
+class ReportSummary(BaseModel):
+    total_amount: float
+    currency: str
+    by_category: list[CategorySummary]

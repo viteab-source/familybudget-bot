@@ -1,6 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Depends
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .db import Base, engine, SessionLocal, get_db
@@ -18,7 +19,6 @@ def on_startup():
 
     db = SessionLocal()
     try:
-        # Проверяем, есть ли хоть одна семья
         default_household = db.query(models.Household).first()
         if default_household is None:
             default_household = models.Household(
@@ -37,7 +37,6 @@ def health_check():
     return {"status": "ok"}
 
 
-# Эндпоинт для создания транзакции
 @app.post("/transactions", response_model=schemas.TransactionRead)
 def create_transaction(
     tx: schemas.TransactionCreate,
@@ -57,10 +56,9 @@ def create_transaction(
         db.commit()
         db.refresh(household)
 
-    # Создаём объект транзакции
     db_tx = models.Transaction(
         household_id=household.id,
-        user_id=None,  # позже привяжем к конкретному пользователю
+        user_id=None,
         amount=tx.amount,
         currency=tx.currency,
         description=tx.description,
@@ -75,7 +73,6 @@ def create_transaction(
     return db_tx
 
 
-# Эндпоинт для получения списка транзакций
 @app.get("/transactions", response_model=list[schemas.TransactionRead])
 def list_transactions(
     start_date: datetime | None = None,
@@ -91,3 +88,50 @@ def list_transactions(
 
     transactions = query.order_by(models.Transaction.date.desc()).all()
     return transactions
+
+
+@app.get("/report/summary", response_model=schemas.ReportSummary)
+def report_summary(
+    days: int = 14,
+    db: Session = Depends(get_db),
+):
+    """Краткий отчёт: сумма и разрез по категориям за N дней."""
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Все транзакции за период
+    txs = (
+        db.query(models.Transaction)
+        .filter(models.Transaction.date >= since)
+        .all()
+    )
+
+    total_amount = float(sum(t.amount for t in txs)) if txs else 0.0
+
+    # Группировка по категориям
+    rows = (
+        db.query(
+            models.Transaction.category,
+            func.sum(models.Transaction.amount).label("total"),
+        )
+        .filter(models.Transaction.date >= since)
+        .group_by(models.Transaction.category)
+        .all()
+    )
+
+    by_category = [
+        schemas.CategorySummary(
+            category=row[0],
+            amount=float(row[1]),
+        )
+        for row in rows
+    ]
+
+    currency = "RUB"
+    if txs:
+        currency = txs[0].currency
+
+    return schemas.ReportSummary(
+        total_amount=total_amount,
+        currency=currency,
+        by_category=by_category,
+    )

@@ -5,4 +5,5 @@ python-dotenv
 SQLAlchemy
 psycopg[binary]
 python-dotenv
+httpx
 
