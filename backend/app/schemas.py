@@ -1,63 +1,84 @@
 from datetime import datetime
+from typing import Optional, List
+
 from pydantic import BaseModel, ConfigDict
 
 
-class TransactionBase(BaseModel):
+# ---------- TRANSACTIONS ----------
+
+
+class TransactionCreate(BaseModel):
     amount: float
     currency: str = "RUB"
-    description: str | None = None
-    category: str | None = None
-    date: datetime | None = None  # если не передать, возьмём текущую дату
+    description: Optional[str] = None
+    category: Optional[str] = None
+    date: Optional[datetime] = None
+
+    # кто именно создал (из Telegram)
+    telegram_id: Optional[int] = None
+    telegram_name: Optional[str] = None
+    telegram_username: Optional[str] = None
 
 
-class TransactionCreate(TransactionBase):
-    """Модель для создания транзакции (то, что приходит от клиента)."""
-    pass
-
-
-class TransactionRead(TransactionBase):
-    """Модель для ответа API (то, что отдаем наружу)."""
+class TransactionRead(BaseModel):
     id: int
-    created_at: datetime
+    household_id: int
+    user_id: Optional[int]
 
-    # Разрешаем Pydantic создавать модель из ORM-объекта SQLAlchemy
+    amount: float
+    currency: str
+    description: Optional[str]
+    category: Optional[str]
+    date: datetime
+    created_at: Optional[datetime] = None
+
     model_config = ConfigDict(from_attributes=True)
-    
+
+
+class ParseTextRequest(BaseModel):
+    text: str
+
+    telegram_id: Optional[int] = None
+    telegram_name: Optional[str] = None
+    telegram_username: Optional[str] = None
+
+
 class CategorySummary(BaseModel):
-    category: str | None = None
+    category: Optional[str]
     amount: float
 
 
 class ReportSummary(BaseModel):
     total_amount: float
     currency: str
-    by_category: list[CategorySummary]
-
-class ParseTextRequest(BaseModel):
-    text: str
-
-from datetime import datetime
-from pydantic import BaseModel
+    by_category: List[CategorySummary]
 
 
-class ReminderBase(BaseModel):
+# ---------- REMINDERS ----------
+
+
+class ReminderCreate(BaseModel):
     title: str
-    amount: float | None = None
+    amount: Optional[float] = None
     currency: str = "RUB"
-    interval_days: int | None = None
-    next_run_at: datetime | None = None
+    interval_days: Optional[int] = None
+    next_run_at: Optional[datetime] = None
+
+    telegram_id: Optional[int] = None
+    telegram_name: Optional[str] = None
+    telegram_username: Optional[str] = None
 
 
-class ReminderCreate(ReminderBase):
-    """То, что приходит от бота при создании напоминания."""
-    pass
-
-
-class ReminderRead(ReminderBase):
-    """То, что отдаём наружу (в т.ч. в бота)."""
+class ReminderRead(BaseModel):
     id: int
-    is_active: bool
-    created_at: datetime
+    household_id: Optional[int]
+    user_id: Optional[int]
 
-    class Config:
-        orm_mode = True
+    title: str
+    amount: Optional[float]
+    currency: str
+    interval_days: Optional[int]
+    next_run_at: Optional[datetime]
+    is_active: bool
+
+    model_config = ConfigDict(from_attributes=True)

@@ -25,6 +25,9 @@ async def api_create_transaction(
     amount: float,
     description: str | None = None,
     category: str | None = None,
+    telegram_id: int | None = None,
+    telegram_name: str | None = None,
+    telegram_username: str | None = None,
 ):
     """Прямое создание транзакции через /transactions."""
     async with httpx.AsyncClient() as client:
@@ -33,6 +36,9 @@ async def api_create_transaction(
             "currency": "RUB",
             "description": description,
             "category": category,
+            "telegram_id": telegram_id,
+            "telegram_name": telegram_name,
+            "telegram_username": telegram_username,
         }
         resp = await client.post(
             f"{API_BASE_URL}/transactions",
@@ -44,7 +50,7 @@ async def api_create_transaction(
 
 
 async def api_get_report(days: int = 14):
-    """Краткий отчёт через /report/summary."""
+    """Краткий отчёт через /report/summary (пока по всей семье)."""
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{API_BASE_URL}/report/summary",
@@ -55,10 +61,20 @@ async def api_get_report(days: int = 14):
         return resp.json()
 
 
-async def api_parse_and_create(text: str):
+async def api_parse_and_create(
+    text: str,
+    telegram_id: int | None = None,
+    telegram_name: str | None = None,
+    telegram_username: str | None = None,
+):
     """Разбор свободного текста через YandexGPT + создание транзакции."""
     async with httpx.AsyncClient() as client:
-        payload = {"text": text}
+        payload = {
+            "text": text,
+            "telegram_id": telegram_id,
+            "telegram_name": telegram_name,
+            "telegram_username": telegram_username,
+        }
         resp = await client.post(
             f"{API_BASE_URL}/transactions/parse-and-create",
             json=payload,
@@ -72,6 +88,9 @@ async def api_create_reminder(
     title: str,
     amount: float | None,
     interval_days: int | None,
+    telegram_id: int | None = None,
+    telegram_name: str | None = None,
+    telegram_username: str | None = None,
 ):
     """Создать напоминание через /reminders."""
     async with httpx.AsyncClient() as client:
@@ -81,6 +100,9 @@ async def api_create_reminder(
             "currency": "RUB",
             "interval_days": interval_days,
             "next_run_at": None,
+            "telegram_id": telegram_id,
+            "telegram_name": telegram_name,
+            "telegram_username": telegram_username,
         }
         resp = await client.post(
             f"{API_BASE_URL}/reminders",
@@ -91,23 +113,32 @@ async def api_create_reminder(
         return resp.json()
 
 
-async def api_list_reminders():
+async def api_list_reminders(telegram_id: int | None = None):
     """Получить список активных напоминаний."""
+    params: dict[str, object] = {"only_active": True}
+    if telegram_id is not None:
+        params["telegram_id"] = telegram_id
+
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{API_BASE_URL}/reminders",
-            params={"only_active": True},
+            params=params,
             timeout=10.0,
         )
         resp.raise_for_status()
         return resp.json()
 
 
-async def api_get_due_reminders():
+async def api_get_due_reminders(telegram_id: int | None = None):
     """Получить напоминания, которые нужно оплатить сегодня (и просроченные)."""
+    params: dict[str, object] = {}
+    if telegram_id is not None:
+        params["telegram_id"] = telegram_id
+
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{API_BASE_URL}/reminders/due-today",
+            params=params,
             timeout=10.0,
         )
         resp.raise_for_status()
@@ -126,7 +157,7 @@ async def api_mark_reminder_paid(reminder_id: int):
 
 
 async def api_export_csv(days: int = 30) -> bytes:
-    """Запросить у бэкенда CSV с транзакциями за N дней."""
+    """Получить CSV с транзакциями за N дней."""
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{API_BASE_URL}/transactions/export/csv",
@@ -137,7 +168,7 @@ async def api_export_csv(days: int = 30) -> bytes:
         return resp.content
 
 
-# ---------- РАСПОЗНАВАНИЕ ГОЛОСА (ПОКА ПРОБЛЕМА С ПРАВАМИ STT) ----------
+# ---------- РАСПОЗНАВАНИЕ ГОЛОСА (STT — ПОКА 401, НО КОД ОСТАВЛЯЕМ) ----------
 
 
 async def stt_recognize_ogg(data: bytes, lang: str = "ru-RU") -> str:
@@ -210,15 +241,15 @@ async def main():
             "Привет! 👋\n"
             "Я FamilyBudget Bot.\n\n"
             "Сейчас я умею:\n"
-            "• просто напиши: Перекресток продукты 2435р вчера — я сам пойму через ИИ\n"
+            "• просто напиши: Перекрёсток продукты 2435₽ вчера — я сам пойму через ИИ\n"
             "• /aiadd — то же самое, но явно через ИИ\n"
             "• /add — ручной ввод суммы\n"
             "• /report — отчёт за последние 14 дней\n"
-            "• /export [дней] — выгрузить расходы в CSV\n"
             "• /remind_add — создать напоминание\n"
             "• /reminders — список напоминаний\n"
             "• /remind_today — что нужно оплатить сегодня\n"
             "• /remind_pay — отметить напоминание как оплачено\n"
+            "• /export — экспорт расходов в CSV\n"
             "• /help — подсказка"
         )
 
@@ -230,14 +261,14 @@ async def main():
             "/start — начать работу\n"
             "/help — помощь\n\n"
             "/add СУММА описание — добавить расход вручную\n"
-            "  пример: /add 2435 Перекресток продукты\n\n"
+            "  пример: /add 2435 Пятёрочка продукты\n\n"
             "/aiadd ТЕКСТ — добавить расход через ИИ (YandexGPT)\n"
-            "  пример: /aiadd Перекресток продукты 2435р вчера\n\n"
+            "  пример: /aiadd Перекрёсток продукты 2435₽ вчера\n\n"
             "Просто текстом (без команды):\n"
-            "  Перекресток продукты 2435р вчера\n"
-            "  Перекресток, продукты, две тысячи четыреста тридцать пять рублей, вчера\n\n"
+            "  Перекрёсток продукты 2435₽ вчера\n"
+            "  Перекрёсток, продукты, две тысячи четыреста тридцать пять рублей, вчера\n\n"
             "/report — отчёт за последние 14 дней\n"
-            "/export [дней] — экспорт расходов в CSV (по умолчанию 30 дней)\n\n"
+            "/export [дней] — экспорт расходов в CSV\n\n"
             "Напоминания:\n"
             "/remind_add НАЗВАНИЕ СУММА ДНЕЙ\n"
             "  пример: /remind_add Коммуналка 8000 30\n"
@@ -246,18 +277,18 @@ async def main():
             "/remind_pay ID — отметить напоминание как оплачено"
         )
 
-    # /add — ручной формат: /add 2435 Перекресток продукты
+    # /add — ручной формат: /add 2435 Пятёрочка продукты
     @dp.message(Command("add"))
     async def cmd_add(message: Message):
         text = message.text or ""
-        parts = text.split(maxsplit=2)
+        parts = text.split(maxsplit=2)  # ['/add', '2435', 'Пятёрочка продукты']
 
         if len(parts) < 2:
             await message.answer(
                 "Формат команды:\n"
                 "/add СУММА описание\n\n"
                 "Пример:\n"
-                "/add 2435 Перекресток продукты"
+                "/add 2435 Пятёрочка продукты"
             )
             return
 
@@ -269,16 +300,24 @@ async def main():
             await message.answer(
                 "Не понял сумму 🤔\n"
                 "Попробуй так:\n"
-                "/add 2435 Перекресток продукты"
+                "/add 2435 Пятёрочка продукты"
             )
             return
 
         description = parts[2] if len(parts) > 2 else None
 
+        from_user = message.from_user
+        telegram_id = from_user.id if from_user else None
+        telegram_name = from_user.full_name if from_user else None
+        telegram_username = from_user.username if from_user else None
+
         try:
             tx = await api_create_transaction(
                 amount=amount,
                 description=description,
+                telegram_id=telegram_id,
+                telegram_name=telegram_name,
+                telegram_username=telegram_username,
             )
         except Exception as e:
             print(f"Ошибка при создании транзакции: {e}")
@@ -288,24 +327,18 @@ async def main():
             )
             return
 
-        desc_text = tx.get("description") or "без описания"
-        currency = tx.get("currency", "RUB")
-        amount_saved = tx.get("amount", amount)
-
-        await message.answer(
-            f"Записал расход: {amount_saved} {currency}\n"
-            f"Описание: {desc_text}"
-        )
+        await send_tx_confirmation(message, tx, description or "", via_ai=False)
 
     # /remind_add — создать напоминание
     @dp.message(Command("remind_add"))
     async def cmd_remind_add(message: Message):
         """
+        Создать напоминание.
         Формат: /remind_add НАЗВАНИЕ СУММА ДНЕЙ
         Пример: /remind_add Коммуналка 8000 30
         """
         text = message.text or ""
-        parts = text.split(maxsplit=3)
+        parts = text.split(maxsplit=3)  # ['/remind_add', 'Коммуналка', '8000', '30']
 
         if len(parts) < 4:
             await message.answer(
@@ -338,8 +371,20 @@ async def main():
             )
             return
 
+        from_user = message.from_user
+        telegram_id = from_user.id if from_user else None
+        telegram_name = from_user.full_name if from_user else None
+        telegram_username = from_user.username if from_user else None
+
         try:
-            rem = await api_create_reminder(title, amount, interval_days)
+            rem = await api_create_reminder(
+                title,
+                amount,
+                interval_days,
+                telegram_id=telegram_id,
+                telegram_name=telegram_name,
+                telegram_username=telegram_username,
+            )
         except Exception as e:
             print(f"Ошибка при создании напоминания: {e}")
             await message.answer(
@@ -368,46 +413,14 @@ async def main():
 
         await message.answer("\n".join(msg))
 
-    # /export — выгрузка расходов в CSV
-    @dp.message(Command("export"))
-    async def cmd_export(message: Message):
-        """
-        Экспорт расходов в CSV-файл.
-        Формат: /export [дней]
-          /export      -> 30 дней по умолчанию
-          /export 90   -> 90 дней
-        """
-        text = message.text or ""
-        parts = text.split(maxsplit=1)
-
-        days = 30
-        if len(parts) == 2:
-            try:
-                days = int(parts[1])
-            except ValueError:
-                await message.answer("Не понял количество дней. Пример: /export 30")
-                return
-
-        try:
-            csv_bytes = await api_export_csv(days)
-        except Exception as e:
-            print(f"Ошибка при экспорте CSV: {e}")
-            await message.answer("Не получилось сделать экспорт 😔 Попробуй позже.")
-            return
-
-        filename = f"transactions_{days}d.csv"
-        file = BufferedInputFile(csv_bytes, filename=filename)
-
-        await message.answer_document(
-            document=file,
-            caption=f"Экспорт расходов за последние {days} дней.",
-        )
-
     # /reminders — список активных напоминаний
     @dp.message(Command("reminders"))
     async def cmd_reminders(message: Message):
+        from_user = message.from_user
+        telegram_id = from_user.id if from_user else None
+
         try:
-            reminders = await api_list_reminders()
+            reminders = await api_list_reminders(telegram_id=telegram_id)
         except Exception as e:
             print(f"Ошибка при получении списка напоминаний: {e}")
             await message.answer(
@@ -430,7 +443,7 @@ async def main():
             if next_date_raw:
                 try:
                     pretty_date = datetime.fromisoformat(next_date_raw).strftime(
-                        "%d.%м.%Y"
+                        "%d.%m.%Y"
                     )
                 except ValueError:
                     pretty_date = next_date_raw
@@ -451,8 +464,14 @@ async def main():
     # /remind_today — что нужно оплатить сегодня
     @dp.message(Command("remind_today"))
     async def cmd_remind_today(message: Message):
+        """
+        Показать, что нужно оплатить сегодня (и всё, что уже просрочено).
+        """
+        from_user = message.from_user
+        telegram_id = from_user.id if from_user else None
+
         try:
-            reminders = await api_get_due_reminders()
+            reminders = await api_get_due_reminders(telegram_id=telegram_id)
         except Exception as e:
             print(f"Ошибка при получении сегодняшних напоминаний: {e}")
             await message.answer(
@@ -486,11 +505,12 @@ async def main():
     @dp.message(Command("remind_pay"))
     async def cmd_remind_pay(message: Message):
         """
+        Отметить напоминание как оплачено.
         Формат: /remind_pay ID
         Пример: /remind_pay 1
         """
         text = message.text or ""
-        parts = text.split(maxsplit=1)
+        parts = text.split(maxsplit=1)  # ['/remind_pay', '1']
 
         if len(parts) < 2:
             await message.answer(
@@ -541,24 +561,74 @@ async def main():
 
         await message.answer("\n".join(msg))
 
+    # /export — экспорт CSV
+    @dp.message(Command("export"))
+    async def cmd_export(message: Message):
+        """
+        Экспорт расходов в CSV-файл.
+        Формат: /export [дней]
+        Примеры:
+          /export        -> 30 дней по умолчанию
+          /export 90     -> 90 дней
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+
+        days = 30
+        if len(parts) == 2:
+            try:
+                days = int(parts[1])
+            except ValueError:
+                await message.answer("Не понял количество дней. Пример: /export 30")
+                return
+
+        try:
+            csv_bytes = await api_export_csv(days)
+        except Exception as e:
+            print(f"Ошибка при экспорте CSV: {e}")
+            await message.answer("Не получилось сделать экспорт 😔 Попробуй позже.")
+            return
+
+        filename = f"transactions_{days}d.csv"
+        file = BufferedInputFile(csv_bytes, filename=filename)
+
+        await message.answer_document(
+            document=file,
+            caption=f"Экспорт расходов за последние {days} дней.",
+        )
+
     # /aiadd — умный ввод через ИИ
     @dp.message(Command("aiadd"))
     async def cmd_aiadd(message: Message):
+        """
+        Умный ввод: /aiadd Перекрёсток продукты 2435₽ вчера
+        Текст после команды отправляем в YandexGPT.
+        """
         text = message.text or ""
-        parts = text.split(maxsplit=1)
+        parts = text.split(maxsplit=1)  # ['/aiadd', 'Перекрёсток продукты 2435₽ вчера']
 
         if len(parts) < 2:
             await message.answer(
                 "Напиши расход после команды.\n\n"
                 "Пример:\n"
-                "/aiadd Перекресток продукты 2435р вчера"
+                "/aiadd Перекрёсток продукты 2435₽ вчера"
             )
             return
 
         raw_text = parts[1]
 
+        from_user = message.from_user
+        telegram_id = from_user.id if from_user else None
+        telegram_name = from_user.full_name if from_user else None
+        telegram_username = from_user.username if from_user else None
+
         try:
-            tx = await api_parse_and_create(raw_text)
+            tx = await api_parse_and_create(
+                raw_text,
+                telegram_id=telegram_id,
+                telegram_name=telegram_name,
+                telegram_username=telegram_username,
+            )
         except Exception as e:
             print(f"Ошибка при разборе свободного текста через ИИ: {e}")
             await message.answer(
@@ -650,9 +720,19 @@ async def main():
             )
             return
 
+        from_user = message.from_user
+        telegram_id = from_user.id if from_user else None
+        telegram_name = from_user.full_name if from_user else None
+        telegram_username = from_user.username if from_user else None
+
         # 3) Текст → транзакция через ИИ
         try:
-            tx = await api_parse_and_create(stt_text)
+            tx = await api_parse_and_create(
+                stt_text,
+                telegram_id=telegram_id,
+                telegram_name=telegram_name,
+                telegram_username=telegram_username,
+            )
         except Exception as e:
             print(f"Ошибка при разборе текста из голосового через ИИ: {e}")
             await message.answer(
@@ -680,8 +760,18 @@ async def main():
         if text.startswith("/"):
             return
 
+        from_user = message.from_user
+        telegram_id = from_user.id if from_user else None
+        telegram_name = from_user.full_name if from_user else None
+        telegram_username = from_user.username if from_user else None
+
         try:
-            tx = await api_parse_and_create(text)
+            tx = await api_parse_and_create(
+                text,
+                telegram_id=telegram_id,
+                telegram_name=telegram_name,
+                telegram_username=telegram_username,
+            )
         except Exception as e:
             print(f"Ошибка при разборе свободного текста через ИИ: {e}")
             await message.answer(
