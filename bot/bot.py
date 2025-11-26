@@ -5,7 +5,7 @@ from datetime import datetime
 import httpx
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message
+from aiogram.types import Message, BufferedInputFile
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения из .env
@@ -125,6 +125,18 @@ async def api_mark_reminder_paid(reminder_id: int):
         return resp.json()
 
 
+async def api_export_csv(days: int = 30) -> bytes:
+    """Запросить у бэкенда CSV с транзакциями за N дней."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{API_BASE_URL}/transactions/export/csv",
+            params={"days": days},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        return resp.content
+
+
 # ---------- РАСПОЗНАВАНИЕ ГОЛОСА (ПОКА ПРОБЛЕМА С ПРАВАМИ STT) ----------
 
 
@@ -198,10 +210,11 @@ async def main():
             "Привет! 👋\n"
             "Я FamilyBudget Bot.\n\n"
             "Сейчас я умею:\n"
-            "• просто напиши: Перекрёсток продукты 2435₽ вчера — я сам пойму через ИИ\n"
+            "• просто напиши: Перекресток продукты 2435р вчера — я сам пойму через ИИ\n"
             "• /aiadd — то же самое, но явно через ИИ\n"
             "• /add — ручной ввод суммы\n"
             "• /report — отчёт за последние 14 дней\n"
+            "• /export [дней] — выгрузить расходы в CSV\n"
             "• /remind_add — создать напоминание\n"
             "• /reminders — список напоминаний\n"
             "• /remind_today — что нужно оплатить сегодня\n"
@@ -217,13 +230,14 @@ async def main():
             "/start — начать работу\n"
             "/help — помощь\n\n"
             "/add СУММА описание — добавить расход вручную\n"
-            "  пример: /add 2435 Пятёрочка продукты\n\n"
+            "  пример: /add 2435 Перекресток продукты\n\n"
             "/aiadd ТЕКСТ — добавить расход через ИИ (YandexGPT)\n"
-            "  пример: /aiadd Перекрёсток продукты 2435₽ вчера\n\n"
+            "  пример: /aiadd Перекресток продукты 2435р вчера\n\n"
             "Просто текстом (без команды):\n"
-            "  Перекрёсток продукты 2435₽ вчера\n"
-            "  Перекрёсток, продукты, две тысячи четыреста тридцать пять рублей, вчера\n\n"
-            "/report — отчёт за последние 14 дней\n\n"
+            "  Перекресток продукты 2435р вчера\n"
+            "  Перекресток, продукты, две тысячи четыреста тридцать пять рублей, вчера\n\n"
+            "/report — отчёт за последние 14 дней\n"
+            "/export [дней] — экспорт расходов в CSV (по умолчанию 30 дней)\n\n"
             "Напоминания:\n"
             "/remind_add НАЗВАНИЕ СУММА ДНЕЙ\n"
             "  пример: /remind_add Коммуналка 8000 30\n"
@@ -232,18 +246,18 @@ async def main():
             "/remind_pay ID — отметить напоминание как оплачено"
         )
 
-    # /add — ручной формат: /add 2435 Пятёрочка продукты
+    # /add — ручной формат: /add 2435 Перекресток продукты
     @dp.message(Command("add"))
     async def cmd_add(message: Message):
         text = message.text or ""
-        parts = text.split(maxsplit=2)  # ['/add', '2435', 'Пятёрочка продукты']
+        parts = text.split(maxsplit=2)
 
         if len(parts) < 2:
             await message.answer(
                 "Формат команды:\n"
                 "/add СУММА описание\n\n"
                 "Пример:\n"
-                "/add 2435 Пятёрочка продукты"
+                "/add 2435 Перекресток продукты"
             )
             return
 
@@ -255,7 +269,7 @@ async def main():
             await message.answer(
                 "Не понял сумму 🤔\n"
                 "Попробуй так:\n"
-                "/add 2435 Пятёрочка продукты"
+                "/add 2435 Перекресток продукты"
             )
             return
 
@@ -287,12 +301,11 @@ async def main():
     @dp.message(Command("remind_add"))
     async def cmd_remind_add(message: Message):
         """
-        Создать напоминание.
         Формат: /remind_add НАЗВАНИЕ СУММА ДНЕЙ
         Пример: /remind_add Коммуналка 8000 30
         """
         text = message.text or ""
-        parts = text.split(maxsplit=3)  # ['/remind_add', 'Коммуналка', '8000', '30']
+        parts = text.split(maxsplit=3)
 
         if len(parts) < 4:
             await message.answer(
@@ -355,6 +368,41 @@ async def main():
 
         await message.answer("\n".join(msg))
 
+    # /export — выгрузка расходов в CSV
+    @dp.message(Command("export"))
+    async def cmd_export(message: Message):
+        """
+        Экспорт расходов в CSV-файл.
+        Формат: /export [дней]
+          /export      -> 30 дней по умолчанию
+          /export 90   -> 90 дней
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+
+        days = 30
+        if len(parts) == 2:
+            try:
+                days = int(parts[1])
+            except ValueError:
+                await message.answer("Не понял количество дней. Пример: /export 30")
+                return
+
+        try:
+            csv_bytes = await api_export_csv(days)
+        except Exception as e:
+            print(f"Ошибка при экспорте CSV: {e}")
+            await message.answer("Не получилось сделать экспорт 😔 Попробуй позже.")
+            return
+
+        filename = f"transactions_{days}d.csv"
+        file = BufferedInputFile(csv_bytes, filename=filename)
+
+        await message.answer_document(
+            document=file,
+            caption=f"Экспорт расходов за последние {days} дней.",
+        )
+
     # /reminders — список активных напоминаний
     @dp.message(Command("reminders"))
     async def cmd_reminders(message: Message):
@@ -382,7 +430,7 @@ async def main():
             if next_date_raw:
                 try:
                     pretty_date = datetime.fromisoformat(next_date_raw).strftime(
-                        "%d.%m.%Y"
+                        "%d.%м.%Y"
                     )
                 except ValueError:
                     pretty_date = next_date_raw
@@ -403,9 +451,6 @@ async def main():
     # /remind_today — что нужно оплатить сегодня
     @dp.message(Command("remind_today"))
     async def cmd_remind_today(message: Message):
-        """
-        Показать, что нужно оплатить сегодня (и всё, что уже просрочено).
-        """
         try:
             reminders = await api_get_due_reminders()
         except Exception as e:
@@ -441,12 +486,11 @@ async def main():
     @dp.message(Command("remind_pay"))
     async def cmd_remind_pay(message: Message):
         """
-        Отметить напоминание как оплачено.
         Формат: /remind_pay ID
         Пример: /remind_pay 1
         """
         text = message.text or ""
-        parts = text.split(maxsplit=1)  # ['/remind_pay', '1']
+        parts = text.split(maxsplit=1)
 
         if len(parts) < 2:
             await message.answer(
@@ -500,18 +544,14 @@ async def main():
     # /aiadd — умный ввод через ИИ
     @dp.message(Command("aiadd"))
     async def cmd_aiadd(message: Message):
-        """
-        Умный ввод: /aiadd Перекрёсток продукты 2435₽ вчера
-        Текст после команды отправляем в YandexGPT.
-        """
         text = message.text or ""
-        parts = text.split(maxsplit=1)  # ['/aiadd', 'Перекрёсток продукты 2435₽ вчера']
+        parts = text.split(maxsplit=1)
 
         if len(parts) < 2:
             await message.answer(
                 "Напиши расход после команды.\n\n"
                 "Пример:\n"
-                "/aiadd Перекрёсток продукты 2435₽ вчера"
+                "/aiadd Перекресток продукты 2435р вчера"
             )
             return
 

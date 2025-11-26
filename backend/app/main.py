@@ -1,6 +1,9 @@
+import csv
+from io import StringIO
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -12,13 +15,15 @@ from .ai import parse_text_to_transaction
 app = FastAPI(title="FamilyBudget API")
 
 
-# При старте приложения:
-# 1) создаём таблицы
-# 2) создаём одну семью по умолчанию, если её ещё нет
+# ---------- STARTUP ----------
+
+
 @app.on_event("startup")
 def on_startup():
+    # Создаём таблицы
     Base.metadata.create_all(bind=engine)
 
+    # Создаём одну семью по умолчанию, если её ещё нет
     db = SessionLocal()
     try:
         default_household = db.query(models.Household).first()
@@ -215,6 +220,56 @@ def parse_and_create_transaction(
     return db_tx
 
 
+@app.get("/transactions/export/csv")
+def export_transactions_csv(
+    days: int = 30,
+    db: Session = Depends(get_db),
+):
+    """
+    Экспорт транзакций за N дней в CSV (для импорта в Google Sheets).
+    """
+    since = datetime.utcnow() - timedelta(days=days)
+
+    txs = (
+        db.query(models.Transaction)
+        .filter(models.Transaction.date >= since)
+        .order_by(models.Transaction.date.asc())
+        .all()
+    )
+
+    buf = StringIO()
+    writer = csv.writer(buf)
+
+    # Заголовки столбцов
+    writer.writerow(
+        ["id", "date", "amount", "currency", "category", "description", "created_at"]
+    )
+
+    for t in txs:
+        writer.writerow(
+            [
+                t.id,
+                t.date.isoformat() if t.date else "",
+                float(t.amount),
+                t.currency,
+                t.category or "",
+                t.description or "",
+                t.created_at.isoformat()
+                if getattr(t, "created_at", None)
+                else "",
+            ]
+        )
+
+    buf.seek(0)
+    filename = f"transactions_last_{days}_days.csv"
+
+    return StreamingResponse(
+        buf,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ---------- REMINDERS (НАПОМИНАНИЯ) ----------
 
 
@@ -259,6 +314,7 @@ def list_reminders(
         query.order_by(models.Reminder.next_run_at.asc().nullslast()).all()
     )
     return reminders
+
 
 @app.get("/reminders/due-today", response_model=list[schemas.ReminderRead])
 def reminders_due_today(
