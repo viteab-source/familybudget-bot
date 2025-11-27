@@ -13,32 +13,33 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
-
-# Для распознавания голоса (пока у нас там 401, но оставляем код как есть)
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
 
-# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С БЭКЕНДОМ ----------
+# -----------------------
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ API
+# -----------------------
 
 
 async def api_create_transaction(
     amount: float,
     description: str | None = None,
     category: str | None = None,
-    telegram_id: int | None = None,
-    telegram_name: str | None = None,
-    telegram_username: str | None = None,
+    kind: str = "expense",
 ):
-    """Прямое создание транзакции через /transactions."""
+    """
+    Прямое создание транзакции через /transactions.
+    kind:
+      - "expense" — расход
+      - "income" — доход
+    """
     async with httpx.AsyncClient() as client:
         payload = {
             "amount": amount,
             "currency": "RUB",
             "description": description,
             "category": category,
-            "telegram_id": telegram_id,
-            "telegram_name": telegram_name,
-            "telegram_username": telegram_username,
+            "kind": kind,
         }
         resp = await client.post(
             f"{API_BASE_URL}/transactions",
@@ -49,8 +50,7 @@ async def api_create_transaction(
         return resp.json()
 
 
-async def api_get_report(days: int = 14):
-    """Краткий отчёт через /report/summary (пока по всей семье)."""
+async def api_get_summary_report(days: int = 14):
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{API_BASE_URL}/report/summary",
@@ -61,20 +61,21 @@ async def api_get_report(days: int = 14):
         return resp.json()
 
 
-async def api_parse_and_create(
-    text: str,
-    telegram_id: int | None = None,
-    telegram_name: str | None = None,
-    telegram_username: str | None = None,
-):
-    """Разбор свободного текста через YandexGPT + создание транзакции."""
+async def api_get_balance_report(days: int = 30):
     async with httpx.AsyncClient() as client:
-        payload = {
-            "text": text,
-            "telegram_id": telegram_id,
-            "telegram_name": telegram_name,
-            "telegram_username": telegram_username,
-        }
+        resp = await client.get(
+            f"{API_BASE_URL}/report/balance",
+            params={"days": days},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def api_parse_and_create(text: str):
+    """Разбор свободного текста через YandexGPT + создание транзакции (расход)."""
+    async with httpx.AsyncClient() as client:
+        payload = {"text": text}
         resp = await client.post(
             f"{API_BASE_URL}/transactions/parse-and-create",
             json=payload,
@@ -88,11 +89,8 @@ async def api_create_reminder(
     title: str,
     amount: float | None,
     interval_days: int | None,
-    telegram_id: int | None = None,
-    telegram_name: str | None = None,
-    telegram_username: str | None = None,
+    telegram_id: int | None,
 ):
-    """Создать напоминание через /reminders."""
     async with httpx.AsyncClient() as client:
         payload = {
             "title": title,
@@ -100,12 +98,14 @@ async def api_create_reminder(
             "currency": "RUB",
             "interval_days": interval_days,
             "next_run_at": None,
-            "telegram_id": telegram_id,
-            "telegram_name": telegram_name,
-            "telegram_username": telegram_username,
         }
+        params = {}
+        if telegram_id:
+            params["telegram_id"] = telegram_id
+
         resp = await client.post(
             f"{API_BASE_URL}/reminders",
+            params=params,
             json=payload,
             timeout=10.0,
         )
@@ -113,13 +113,12 @@ async def api_create_reminder(
         return resp.json()
 
 
-async def api_list_reminders(telegram_id: int | None = None):
-    """Получить список активных напоминаний."""
-    params: dict[str, object] = {"only_active": True}
-    if telegram_id is not None:
-        params["telegram_id"] = telegram_id
-
+async def api_list_reminders(telegram_id: int | None):
     async with httpx.AsyncClient() as client:
+        params = {"only_active": True}
+        if telegram_id:
+            params["telegram_id"] = telegram_id
+
         resp = await client.get(
             f"{API_BASE_URL}/reminders",
             params=params,
@@ -129,13 +128,12 @@ async def api_list_reminders(telegram_id: int | None = None):
         return resp.json()
 
 
-async def api_get_due_reminders(telegram_id: int | None = None):
-    """Получить напоминания, которые нужно оплатить сегодня (и просроченные)."""
-    params: dict[str, object] = {}
-    if telegram_id is not None:
-        params["telegram_id"] = telegram_id
-
+async def api_get_due_reminders(telegram_id: int | None):
     async with httpx.AsyncClient() as client:
+        params = {}
+        if telegram_id:
+            params["telegram_id"] = telegram_id
+
         resp = await client.get(
             f"{API_BASE_URL}/reminders/due-today",
             params=params,
@@ -146,7 +144,6 @@ async def api_get_due_reminders(telegram_id: int | None = None):
 
 
 async def api_mark_reminder_paid(reminder_id: int):
-    """Отметить напоминание как оплачено."""
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{API_BASE_URL}/reminders/{reminder_id}/mark-paid",
@@ -156,8 +153,7 @@ async def api_mark_reminder_paid(reminder_id: int):
         return resp.json()
 
 
-async def api_export_csv(days: int = 30) -> bytes:
-    """Получить CSV с транзакциями за N дней."""
+async def api_export_csv(days: int = 30):
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{API_BASE_URL}/transactions/export/csv",
@@ -168,14 +164,12 @@ async def api_export_csv(days: int = 30) -> bytes:
         return resp.content
 
 
-# ---------- РАСПОЗНАВАНИЕ ГОЛОСА (STT — ПОКА 401, НО КОД ОСТАВЛЯЕМ) ----------
+# -----------------------
+# STT (пока не работает из-за прав, но код оставим)
+# -----------------------
 
 
 async def stt_recognize_ogg(data: bytes, lang: str = "ru-RU") -> str:
-    """
-    Распознаёт речь из OGG/Opus (голосовое Telegram) через Yandex SpeechKit STT v1.
-    Сейчас у нас 401 PermissionDenied, но код оставляем, чтобы потом вернуть.
-    """
     if not YANDEX_API_KEY:
         raise RuntimeError("YANDEX_API_KEY не найден. Проверь .env")
 
@@ -224,7 +218,9 @@ async def stt_recognize_ogg(data: bytes, lang: str = "ru-RU") -> str:
     return payload.get("result", "")
 
 
-# ---------- ОСНОВНАЯ ЛОГИКА БОТА ----------
+# -----------------------
+# ОСНОВНАЯ ЛОГИКА БОТА
+# -----------------------
 
 
 async def main():
@@ -242,14 +238,16 @@ async def main():
             "Я FamilyBudget Bot.\n\n"
             "Сейчас я умею:\n"
             "• просто напиши: Перекрёсток продукты 2435₽ вчера — я сам пойму через ИИ\n"
-            "• /aiadd — то же самое, но явно через ИИ\n"
-            "• /add — ручной ввод суммы\n"
-            "• /report — отчёт за последние 14 дней\n"
+            "• /aiadd — добавить расход через ИИ\n"
+            "• /add — добавить расход вручную\n"
+            "• /income — добавить доход вручную\n"
+            "• /report — отчёт по расходам за последние 14 дней\n"
+            "• /balance — баланс (доходы/расходы) за период\n"
+            "• /export — экспорт расходов/доходов в CSV\n"
             "• /remind_add — создать напоминание\n"
             "• /reminders — список напоминаний\n"
             "• /remind_today — что нужно оплатить сегодня\n"
             "• /remind_pay — отметить напоминание как оплачено\n"
-            "• /export — экспорт расходов в CSV\n"
             "• /help — подсказка"
         )
 
@@ -262,13 +260,13 @@ async def main():
             "/help — помощь\n\n"
             "/add СУММА описание — добавить расход вручную\n"
             "  пример: /add 2435 Пятёрочка продукты\n\n"
+            "/income СУММА описание — добавить доход вручную\n"
+            "  пример: /income 50000 Зарплата\n\n"
             "/aiadd ТЕКСТ — добавить расход через ИИ (YandexGPT)\n"
             "  пример: /aiadd Перекрёсток продукты 2435₽ вчера\n\n"
-            "Просто текстом (без команды):\n"
-            "  Перекрёсток продукты 2435₽ вчера\n"
-            "  Перекрёсток, продукты, две тысячи четыреста тридцать пять рублей, вчера\n\n"
-            "/report — отчёт за последние 14 дней\n"
-            "/export [дней] — экспорт расходов в CSV\n\n"
+            "/report [дней] — отчёт по расходам (по умолчанию 14)\n"
+            "/balance [дней] — баланс доходы/расходы (по умолчанию 30)\n"
+            "/export [дней] — экспорт в CSV (по умолчанию 30)\n\n"
             "Напоминания:\n"
             "/remind_add НАЗВАНИЕ СУММА ДНЕЙ\n"
             "  пример: /remind_add Коммуналка 8000 30\n"
@@ -277,11 +275,11 @@ async def main():
             "/remind_pay ID — отметить напоминание как оплачено"
         )
 
-    # /add — ручной формат: /add 2435 Пятёрочка продукты
+    # /add — расход
     @dp.message(Command("add"))
     async def cmd_add(message: Message):
         text = message.text or ""
-        parts = text.split(maxsplit=2)  # ['/add', '2435', 'Пятёрочка продукты']
+        parts = text.split(maxsplit=2)
 
         if len(parts) < 2:
             await message.answer(
@@ -306,18 +304,11 @@ async def main():
 
         description = parts[2] if len(parts) > 2 else None
 
-        from_user = message.from_user
-        telegram_id = from_user.id if from_user else None
-        telegram_name = from_user.full_name if from_user else None
-        telegram_username = from_user.username if from_user else None
-
         try:
             tx = await api_create_transaction(
                 amount=amount,
                 description=description,
-                telegram_id=telegram_id,
-                telegram_name=telegram_name,
-                telegram_username=telegram_username,
+                kind="expense",
             )
         except Exception as e:
             print(f"Ошибка при создании транзакции: {e}")
@@ -329,16 +320,65 @@ async def main():
 
         await send_tx_confirmation(message, tx, description or "", via_ai=False)
 
+    # /income — доход
+    @dp.message(Command("income"))
+    async def cmd_income(message: Message):
+        """
+        Формат: /income СУММА описание
+        Пример: /income 50000 Зарплата
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=2)
+
+        if len(parts) < 2:
+            await message.answer(
+                "Формат команды:\n"
+                "/income СУММА описание\n\n"
+                "Пример:\n"
+                "/income 50000 Зарплата"
+            )
+            return
+
+        amount_str = parts[1].replace(",", ".")
+
+        try:
+            amount = float(amount_str)
+        except ValueError:
+            await message.answer(
+                "Не понял сумму 🤔\n"
+                "Пример: /income 50000 Зарплата"
+            )
+            return
+
+        description = parts[2] if len(parts) > 2 else "Доход"
+
+        try:
+            tx = await api_create_transaction(
+                amount=amount,
+                description=description,
+                kind="income",
+            )
+        except Exception as e:
+            print(f"Ошибка при создании дохода: {e}")
+            await message.answer(
+                "Не получилось сохранить доход 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        await send_tx_confirmation(
+            message,
+            tx,
+            description,
+            via_ai=False,
+            prefix="Записал доход:",
+        )
+
     # /remind_add — создать напоминание
     @dp.message(Command("remind_add"))
     async def cmd_remind_add(message: Message):
-        """
-        Создать напоминание.
-        Формат: /remind_add НАЗВАНИЕ СУММА ДНЕЙ
-        Пример: /remind_add Коммуналка 8000 30
-        """
         text = message.text or ""
-        parts = text.split(maxsplit=3)  # ['/remind_add', 'Коммуналка', '8000', '30']
+        parts = text.split(maxsplit=3)
 
         if len(parts) < 4:
             await message.answer(
@@ -371,19 +411,12 @@ async def main():
             )
             return
 
-        from_user = message.from_user
-        telegram_id = from_user.id if from_user else None
-        telegram_name = from_user.full_name if from_user else None
-        telegram_username = from_user.username if from_user else None
-
         try:
             rem = await api_create_reminder(
                 title,
                 amount,
                 interval_days,
-                telegram_id=telegram_id,
-                telegram_name=telegram_name,
-                telegram_username=telegram_username,
+                telegram_id=message.from_user.id,
             )
         except Exception as e:
             print(f"Ошибка при создании напоминания: {e}")
@@ -397,7 +430,9 @@ async def main():
         pretty_date = None
         if next_date_raw:
             try:
-                pretty_date = datetime.fromisoformat(next_date_raw).strftime("%d.%m.%Y")
+                pretty_date = datetime.fromisoformat(next_date_raw).strftime(
+                    "%d.%m.%Y"
+                )
             except ValueError:
                 pretty_date = next_date_raw
 
@@ -416,11 +451,8 @@ async def main():
     # /reminders — список активных напоминаний
     @dp.message(Command("reminders"))
     async def cmd_reminders(message: Message):
-        from_user = message.from_user
-        telegram_id = from_user.id if from_user else None
-
         try:
-            reminders = await api_list_reminders(telegram_id=telegram_id)
+            reminders = await api_list_reminders(telegram_id=message.from_user.id)
         except Exception as e:
             print(f"Ошибка при получении списка напоминаний: {e}")
             await message.answer(
@@ -464,14 +496,8 @@ async def main():
     # /remind_today — что нужно оплатить сегодня
     @dp.message(Command("remind_today"))
     async def cmd_remind_today(message: Message):
-        """
-        Показать, что нужно оплатить сегодня (и всё, что уже просрочено).
-        """
-        from_user = message.from_user
-        telegram_id = from_user.id if from_user else None
-
         try:
-            reminders = await api_get_due_reminders(telegram_id=telegram_id)
+            reminders = await api_get_due_reminders(telegram_id=message.from_user.id)
         except Exception as e:
             print(f"Ошибка при получении сегодняшних напоминаний: {e}")
             await message.answer(
@@ -504,13 +530,8 @@ async def main():
     # /remind_pay — отметить напоминание как оплачено
     @dp.message(Command("remind_pay"))
     async def cmd_remind_pay(message: Message):
-        """
-        Отметить напоминание как оплачено.
-        Формат: /remind_pay ID
-        Пример: /remind_pay 1
-        """
         text = message.text or ""
-        parts = text.split(maxsplit=1)  # ['/remind_pay', '1']
+        parts = text.split(maxsplit=1)
 
         if len(parts) < 2:
             await message.answer(
@@ -561,16 +582,127 @@ async def main():
 
         await message.answer("\n".join(msg))
 
+    # /aiadd — умный ввод расхода через ИИ
+    @dp.message(Command("aiadd"))
+    async def cmd_aiadd(message: Message):
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+
+        if len(parts) < 2:
+            await message.answer(
+                "Напиши расход после команды.\n\n"
+                "Пример:\n"
+                "/aiadd Перекрёсток продукты 2435₽ вчера"
+            )
+            return
+
+        raw_text = parts[1]
+
+        try:
+            tx = await api_parse_and_create(raw_text)
+        except Exception as e:
+            print(f"Ошибка при разборе свободного текста через ИИ: {e}")
+            await message.answer(
+                "Не получилось разобрать расход через ИИ 😔\n"
+                "Попробуй ещё раз или используй /add."
+            )
+            return
+
+        await send_tx_confirmation(message, tx, raw_text, via_ai=True)
+
+    # /report — отчёт по расходам
+    @dp.message(Command("report"))
+    async def cmd_report(message: Message):
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+
+        days = 14
+        if len(parts) == 2:
+            try:
+                days = int(parts[1])
+            except ValueError:
+                await message.answer("Не понял количество дней. Пример: /report 14")
+                return
+
+        try:
+            report = await api_get_summary_report(days=days)
+        except Exception as e:
+            print(f"Ошибка при получении отчёта: {e}")
+            await message.answer(
+                "Не получилось получить отчёт 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        total = report.get("total_amount", 0)
+        currency = report.get("currency", "RUB")
+        by_cat = report.get("by_category", [])
+
+        if not by_cat and total == 0:
+            await message.answer(
+                "Пока нет расходов за этот период 🙂\n"
+                "Добавь расход через /add или /aiadd"
+            )
+            return
+
+        lines = [
+            f"Отчёт по расходам за последние {days} дней:",
+            f"Всего расходов: {total:.2f} {currency}",
+            "",
+            "По категориям:",
+        ]
+
+        for item in by_cat:
+            cat = item.get("category") or "Без категории"
+            amt = item.get("amount", 0)
+            lines.append(f"- {cat}: {amt:.2f} {currency}")
+
+        await message.answer("\n".join(lines))
+
+    # /balance — баланс доходы/расходы
+    @dp.message(Command("balance"))
+    async def cmd_balance(message: Message):
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+
+        days = 30
+        if len(parts) == 2:
+            try:
+                days = int(parts[1])
+            except ValueError:
+                await message.answer("Не понял количество дней. Пример: /balance 30")
+                return
+
+        try:
+            report = await api_get_balance_report(days=days)
+        except Exception as e:
+            print(f"Ошибка при получении баланса: {e}")
+            await message.answer(
+                "Не получилось получить баланс 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        expenses = report.get("expenses_total", 0.0)
+        incomes = report.get("incomes_total", 0.0)
+        net = report.get("net", 0.0)
+        currency = report.get("currency", "RUB")
+
+        sign = "➕" if net >= 0 else "➖"
+
+        lines = [
+            f"Баланс за последние {days} дней:",
+            f"Доходы: {incomes:.2f} {currency}",
+            f"Расходы: {expenses:.2f} {currency}",
+            "",
+            f"Итог: {sign} {net:.2f} {currency}",
+        ]
+
+        await message.answer("\n".join(lines))
+
     # /export — экспорт CSV
     @dp.message(Command("export"))
     async def cmd_export(message: Message):
-        """
-        Экспорт расходов в CSV-файл.
-        Формат: /export [дней]
-        Примеры:
-          /export        -> 30 дней по умолчанию
-          /export 90     -> 90 дней
-        """
         text = message.text or ""
         parts = text.split(maxsplit=1)
 
@@ -594,97 +726,14 @@ async def main():
 
         await message.answer_document(
             document=file,
-            caption=f"Экспорт расходов за последние {days} дней.",
+            caption=f"Экспорт транзакций за последние {days} дней.",
         )
 
-    # /aiadd — умный ввод через ИИ
-    @dp.message(Command("aiadd"))
-    async def cmd_aiadd(message: Message):
-        """
-        Умный ввод: /aiadd Перекрёсток продукты 2435₽ вчера
-        Текст после команды отправляем в YandexGPT.
-        """
-        text = message.text or ""
-        parts = text.split(maxsplit=1)  # ['/aiadd', 'Перекрёсток продукты 2435₽ вчера']
-
-        if len(parts) < 2:
-            await message.answer(
-                "Напиши расход после команды.\n\n"
-                "Пример:\n"
-                "/aiadd Перекрёсток продукты 2435₽ вчера"
-            )
-            return
-
-        raw_text = parts[1]
-
-        from_user = message.from_user
-        telegram_id = from_user.id if from_user else None
-        telegram_name = from_user.full_name if from_user else None
-        telegram_username = from_user.username if from_user else None
-
-        try:
-            tx = await api_parse_and_create(
-                raw_text,
-                telegram_id=telegram_id,
-                telegram_name=telegram_name,
-                telegram_username=telegram_username,
-            )
-        except Exception as e:
-            print(f"Ошибка при разборе свободного текста через ИИ: {e}")
-            await message.answer(
-                "Не получилось разобрать расход через ИИ 😔\n"
-                "Попробуй ещё раз или используй /add."
-            )
-            return
-
-        await send_tx_confirmation(message, tx, raw_text, via_ai=True)
-
-    # /report — отчёт по последним 14 дням
-    @dp.message(Command("report"))
-    async def cmd_report(message: Message):
-        days = 14
-
-        try:
-            report = await api_get_report(days=days)
-        except Exception as e:
-            print(f"Ошибка при получении отчёта: {e}")
-            await message.answer(
-                "Не получилось получить отчёт 😔\n"
-                "Попробуй позже."
-            )
-            return
-
-        total = report.get("total_amount", 0)
-        currency = report.get("currency", "RUB")
-        by_cat = report.get("by_category", [])
-
-        if not by_cat and total == 0:
-            await message.answer(
-                "Пока нет расходов за этот период 🙂\n"
-                "Добавь расход через /add или /aiadd"
-            )
-            return
-
-        lines = [
-            f"Отчёт за последние {days} дней:",
-            f"Всего расходов: {total:.2f} {currency}",
-            "",
-            "По категориям:",
-        ]
-
-        for item in by_cat:
-            cat = item.get("category") or "Без категории"
-            amt = item.get("amount", 0)
-            lines.append(f"- {cat}: {amt:.2f} {currency}")
-
-        await message.answer("\n".join(lines))
-
-    # Голосовые — пока пытаемся, но из-за 401 может не работать
+    # Голосовые — как раньше (пока STT не работает)
     @dp.message(F.voice)
     async def handle_voice(message: Message):
         await message.answer("Секунду, распознаю голос и запишу расход... 🎧")
 
-        # 1) скачиваем голосовое из Telegram
         try:
             file = await bot.get_file(message.voice.file_id)
             file_path = file.file_path
@@ -702,7 +751,6 @@ async def main():
             )
             return
 
-        # 2) STT → текст
         try:
             stt_text = await stt_recognize_ogg(ogg_data)
         except Exception as e:
@@ -720,19 +768,8 @@ async def main():
             )
             return
 
-        from_user = message.from_user
-        telegram_id = from_user.id if from_user else None
-        telegram_name = from_user.full_name if from_user else None
-        telegram_username = from_user.username if from_user else None
-
-        # 3) Текст → транзакция через ИИ
         try:
-            tx = await api_parse_and_create(
-                stt_text,
-                telegram_id=telegram_id,
-                telegram_name=telegram_name,
-                telegram_username=telegram_username,
-            )
+            tx = await api_parse_and_create(stt_text)
         except Exception as e:
             print(f"Ошибка при разборе текста из голосового через ИИ: {e}")
             await message.answer(
@@ -749,29 +786,17 @@ async def main():
             prefix="Распознал голос и записал расход через ИИ:",
         )
 
-    # ---- ЛЮБОЙ ПРОСТОЙ ТЕКСТ -> ИИ (как /aiadd) ----
+    # Любой текст без команды — как /aiadd (расход)
     @dp.message()
     async def handle_free_text(message: Message):
         text = (message.text or "").strip()
         if not text:
             return
-
-        # Команды (начинаются с "/") сюда не должны попадать
         if text.startswith("/"):
             return
 
-        from_user = message.from_user
-        telegram_id = from_user.id if from_user else None
-        telegram_name = from_user.full_name if from_user else None
-        telegram_username = from_user.username if from_user else None
-
         try:
-            tx = await api_parse_and_create(
-                text,
-                telegram_id=telegram_id,
-                telegram_name=telegram_name,
-                telegram_username=telegram_username,
-            )
+            tx = await api_parse_and_create(text)
         except Exception as e:
             print(f"Ошибка при разборе свободного текста через ИИ: {e}")
             await message.answer(
@@ -793,12 +818,12 @@ async def send_tx_confirmation(
     via_ai: bool = False,
     prefix: str | None = None,
 ):
-    """Формирует красивый ответ про записанный расход."""
     amount = tx.get("amount")
     currency = tx.get("currency", "RUB")
     description = tx.get("description") or source_text
     category = tx.get("category") or "Без категории"
     date_raw = tx.get("date")
+    kind = tx.get("kind", "expense")
 
     pretty_date = None
     if date_raw:
@@ -813,9 +838,15 @@ async def send_tx_confirmation(
         lines.append(prefix)
     else:
         if via_ai:
-            lines.append("Записал расход через ИИ:")
+            if kind == "income":
+                lines.append("Записал доход через ИИ:")
+            else:
+                lines.append("Записал расход через ИИ:")
         else:
-            lines.append("Записал расход:")
+            if kind == "income":
+                lines.append("Записал доход:")
+            else:
+                lines.append("Записал расход:")
 
     lines.append(f"{amount} {currency}")
     lines.append(f"Категория: {category}")

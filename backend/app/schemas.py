@@ -1,51 +1,51 @@
 from datetime import datetime
 from typing import Optional, List
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 
-# ---------- TRANSACTIONS ----------
+# -----------------------
+# ТРАНЗАКЦИИ
+# -----------------------
 
 
-class TransactionCreate(BaseModel):
+class TransactionBase(BaseModel):
     amount: float
     currency: str = "RUB"
     description: Optional[str] = None
     category: Optional[str] = None
     date: Optional[datetime] = None
 
-    # кто именно создал (из Telegram)
-    telegram_id: Optional[int] = None
-    telegram_name: Optional[str] = None
-    telegram_username: Optional[str] = None
+    # НОВОЕ: тип операции
+    # "expense" — расход, "income" — доход
+    kind: str = "expense"
+
+    class Config:
+        from_attributes = True
 
 
-class TransactionRead(BaseModel):
+class TransactionCreate(TransactionBase):
+    pass
+
+
+class TransactionRead(TransactionBase):
     id: int
     household_id: int
-    user_id: Optional[int]
-
-    amount: float
-    currency: str
-    description: Optional[str]
-    category: Optional[str]
-    date: datetime
-    created_at: Optional[datetime] = None
-
-    model_config = ConfigDict(from_attributes=True)
+    user_id: Optional[int] = None
+    created_at: datetime
 
 
-class ParseTextRequest(BaseModel):
-    text: str
-
-    telegram_id: Optional[int] = None
-    telegram_name: Optional[str] = None
-    telegram_username: Optional[str] = None
+# -----------------------
+# ОТЧЁТЫ
+# -----------------------
 
 
 class CategorySummary(BaseModel):
     category: Optional[str]
     amount: float
+
+    class Config:
+        from_attributes = True
 
 
 class ReportSummary(BaseModel):
@@ -54,31 +54,51 @@ class ReportSummary(BaseModel):
     by_category: List[CategorySummary]
 
 
-# ---------- REMINDERS ----------
+class BalanceReport(BaseModel):
+    """
+    Отчёт по балансу за период:
+    доходы, расходы, итог.
+    """
+
+    days: int
+    expenses_total: float
+    incomes_total: float
+    net: float  # incomes_total - expenses_total
+    currency: str
 
 
-class ReminderCreate(BaseModel):
+# -----------------------
+# НАПОМИНАНИЯ
+# -----------------------
+
+
+class ReminderBase(BaseModel):
     title: str
     amount: Optional[float] = None
     currency: str = "RUB"
     interval_days: Optional[int] = None
     next_run_at: Optional[datetime] = None
 
-    telegram_id: Optional[int] = None
-    telegram_name: Optional[str] = None
-    telegram_username: Optional[str] = None
+    class Config:
+        from_attributes = True
 
 
-class ReminderRead(BaseModel):
+class ReminderCreate(ReminderBase):
+    pass
+
+
+class ReminderRead(ReminderBase):
     id: int
-    household_id: Optional[int]
-    user_id: Optional[int]
-
-    title: str
-    amount: Optional[float]
-    currency: str
-    interval_days: Optional[int]
-    next_run_at: Optional[datetime]
+    household_id: int
+    user_id: Optional[int] = None
     is_active: bool
+    created_at: datetime
 
-    model_config = ConfigDict(from_attributes=True)
+
+# -----------------------
+# ВСПОМОГАТЕЛЬНОЕ
+# -----------------------
+
+
+class ParseTextRequest(BaseModel):
+    text: str
