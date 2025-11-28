@@ -22,6 +22,7 @@ YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
 
 async def api_create_transaction(
+    telegram_id: int,
     amount: float,
     description: str | None = None,
     category: str | None = None,
@@ -43,6 +44,7 @@ async def api_create_transaction(
         }
         resp = await client.post(
             f"{API_BASE_URL}/transactions",
+            params={"telegram_id": telegram_id},
             json=payload,
             timeout=10.0,
         )
@@ -50,34 +52,35 @@ async def api_create_transaction(
         return resp.json()
 
 
-async def api_get_summary_report(days: int = 14):
+async def api_get_summary_report(telegram_id: int, days: int = 14):
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{API_BASE_URL}/report/summary",
-            params={"days": days},
+            params={"days": days, "telegram_id": telegram_id},
             timeout=10.0,
         )
         resp.raise_for_status()
         return resp.json()
 
 
-async def api_get_balance_report(days: int = 30):
+async def api_get_balance_report(telegram_id: int, days: int = 30):
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{API_BASE_URL}/report/balance",
-            params={"days": days},
+            params={"days": days, "telegram_id": telegram_id},
             timeout=10.0,
         )
         resp.raise_for_status()
         return resp.json()
 
 
-async def api_parse_and_create(text: str):
+async def api_parse_and_create(telegram_id: int, text: str):
     """Разбор свободного текста через YandexGPT + создание транзакции (расход)."""
     async with httpx.AsyncClient() as client:
         payload = {"text": text}
         resp = await client.post(
             f"{API_BASE_URL}/transactions/parse-and-create",
+            params={"telegram_id": telegram_id},
             json=payload,
             timeout=30.0,
         )
@@ -86,10 +89,10 @@ async def api_parse_and_create(text: str):
 
 
 async def api_create_reminder(
+    telegram_id: int,
     title: str,
     amount: float | None,
     interval_days: int | None,
-    telegram_id: int | None,
 ):
     async with httpx.AsyncClient() as client:
         payload = {
@@ -99,9 +102,7 @@ async def api_create_reminder(
             "interval_days": interval_days,
             "next_run_at": None,
         }
-        params = {}
-        if telegram_id:
-            params["telegram_id"] = telegram_id
+        params = {"telegram_id": telegram_id}
 
         resp = await client.post(
             f"{API_BASE_URL}/reminders",
@@ -113,11 +114,9 @@ async def api_create_reminder(
         return resp.json()
 
 
-async def api_list_reminders(telegram_id: int | None):
+async def api_list_reminders(telegram_id: int):
     async with httpx.AsyncClient() as client:
-        params = {"only_active": True}
-        if telegram_id:
-            params["telegram_id"] = telegram_id
+        params = {"only_active": True, "telegram_id": telegram_id}
 
         resp = await client.get(
             f"{API_BASE_URL}/reminders",
@@ -128,11 +127,9 @@ async def api_list_reminders(telegram_id: int | None):
         return resp.json()
 
 
-async def api_get_due_reminders(telegram_id: int | None):
+async def api_get_due_reminders(telegram_id: int):
     async with httpx.AsyncClient() as client:
-        params = {}
-        if telegram_id:
-            params["telegram_id"] = telegram_id
+        params = {"telegram_id": telegram_id}
 
         resp = await client.get(
             f"{API_BASE_URL}/reminders/due-today",
@@ -143,21 +140,26 @@ async def api_get_due_reminders(telegram_id: int | None):
         return resp.json()
 
 
-async def api_mark_reminder_paid(reminder_id: int):
+async def api_mark_reminder_paid(reminder_id: int, telegram_id: int | None = None):
     async with httpx.AsyncClient() as client:
+        params = {}
+        if telegram_id is not None:
+            params["telegram_id"] = telegram_id
+
         resp = await client.post(
             f"{API_BASE_URL}/reminders/{reminder_id}/mark-paid",
+            params=params,
             timeout=10.0,
         )
         resp.raise_for_status()
         return resp.json()
 
 
-async def api_export_csv(days: int = 30):
+async def api_export_csv(telegram_id: int, days: int = 30):
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{API_BASE_URL}/transactions/export/csv",
-            params={"days": days},
+            params={"days": days, "telegram_id": telegram_id},
             timeout=30.0,
         )
         resp.raise_for_status()
@@ -304,8 +306,11 @@ async def main():
 
         description = parts[2] if len(parts) > 2 else None
 
+        telegram_id = message.from_user.id
+
         try:
             tx = await api_create_transaction(
+                telegram_id=telegram_id,
                 amount=amount,
                 description=description,
                 kind="expense",
@@ -352,8 +357,11 @@ async def main():
 
         description = parts[2] if len(parts) > 2 else "Доход"
 
+        telegram_id = message.from_user.id
+
         try:
             tx = await api_create_transaction(
+                telegram_id=telegram_id,
                 amount=amount,
                 description=description,
                 kind="income",
@@ -411,12 +419,14 @@ async def main():
             )
             return
 
+        telegram_id = message.from_user.id
+
         try:
             rem = await api_create_reminder(
-                title,
-                amount,
-                interval_days,
-                telegram_id=message.from_user.id,
+                telegram_id=telegram_id,
+                title=title,
+                amount=amount,
+                interval_days=interval_days,
             )
         except Exception as e:
             print(f"Ошибка при создании напоминания: {e}")
@@ -451,8 +461,10 @@ async def main():
     # /reminders — список активных напоминаний
     @dp.message(Command("reminders"))
     async def cmd_reminders(message: Message):
+        telegram_id = message.from_user.id
+
         try:
-            reminders = await api_list_reminders(telegram_id=message.from_user.id)
+            reminders = await api_list_reminders(telegram_id=telegram_id)
         except Exception as e:
             print(f"Ошибка при получении списка напоминаний: {e}")
             await message.answer(
@@ -496,8 +508,10 @@ async def main():
     # /remind_today — что нужно оплатить сегодня
     @dp.message(Command("remind_today"))
     async def cmd_remind_today(message: Message):
+        telegram_id = message.from_user.id
+
         try:
-            reminders = await api_get_due_reminders(telegram_id=message.from_user.id)
+            reminders = await api_get_due_reminders(telegram_id=telegram_id)
         except Exception as e:
             print(f"Ошибка при получении сегодняшних напоминаний: {e}")
             await message.answer(
@@ -548,8 +562,10 @@ async def main():
             await message.answer("ID должен быть числом. Пример: /remind_pay 1")
             return
 
+        telegram_id = message.from_user.id
+
         try:
-            rem = await api_mark_reminder_paid(rem_id)
+            rem = await api_mark_reminder_paid(rem_id, telegram_id=telegram_id)
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 await message.answer("Напоминание с таким ID не найдено 😔")
@@ -597,9 +613,10 @@ async def main():
             return
 
         raw_text = parts[1]
+        telegram_id = message.from_user.id
 
         try:
-            tx = await api_parse_and_create(raw_text)
+            tx = await api_parse_and_create(telegram_id=telegram_id, text=raw_text)
         except Exception as e:
             print(f"Ошибка при разборе свободного текста через ИИ: {e}")
             await message.answer(
@@ -624,8 +641,10 @@ async def main():
                 await message.answer("Не понял количество дней. Пример: /report 14")
                 return
 
+        telegram_id = message.from_user.id
+
         try:
-            report = await api_get_summary_report(days=days)
+            report = await api_get_summary_report(telegram_id=telegram_id, days=days)
         except Exception as e:
             print(f"Ошибка при получении отчёта: {e}")
             await message.answer(
@@ -673,8 +692,10 @@ async def main():
                 await message.answer("Не понял количество дней. Пример: /balance 30")
                 return
 
+        telegram_id = message.from_user.id
+
         try:
-            report = await api_get_balance_report(days=days)
+            report = await api_get_balance_report(telegram_id=telegram_id, days=days)
         except Exception as e:
             print(f"Ошибка при получении баланса: {e}")
             await message.answer(
@@ -714,8 +735,10 @@ async def main():
                 await message.answer("Не понял количество дней. Пример: /export 30")
                 return
 
+        telegram_id = message.from_user.id
+
         try:
-            csv_bytes = await api_export_csv(days)
+            csv_bytes = await api_export_csv(telegram_id=telegram_id, days=days)
         except Exception as e:
             print(f"Ошибка при экспорте CSV: {e}")
             await message.answer("Не получилось сделать экспорт 😔 Попробуй позже.")
@@ -768,8 +791,10 @@ async def main():
             )
             return
 
+        telegram_id = message.from_user.id
+
         try:
-            tx = await api_parse_and_create(stt_text)
+            tx = await api_parse_and_create(telegram_id=telegram_id, text=stt_text)
         except Exception as e:
             print(f"Ошибка при разборе текста из голосового через ИИ: {e}")
             await message.answer(
@@ -795,8 +820,10 @@ async def main():
         if text.startswith("/"):
             return
 
+        telegram_id = message.from_user.id
+
         try:
-            tx = await api_parse_and_create(text)
+            tx = await api_parse_and_create(telegram_id=telegram_id, text=text)
         except Exception as e:
             print(f"Ошибка при разборе свободного текста через ИИ: {e}")
             await message.answer(
