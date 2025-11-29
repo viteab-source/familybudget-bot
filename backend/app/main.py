@@ -37,6 +37,67 @@ def get_or_create_default_household(db: Session) -> models.Household:
         db.refresh(household)
     return household
 
+def get_or_create_user_and_household(
+    db: Session,
+    telegram_id: int | None,
+) -> tuple[models.User | None, models.Household]:
+    """
+    Возвращает (user, household) для данного telegram_id.
+
+    Если telegram_id не передан (None) — используем глобальную Default family
+    и user=None. Это нужно, чтобы всё работало через Swagger / ручные запросы.
+    """
+    # 1. Если не знаем telegram_id — работаем по старинке
+    if telegram_id is None:
+        household = get_or_create_default_household(db)
+        return None, household
+
+    # 2. Ищем пользователя по telegram_id
+    user = (
+        db.query(models.User)
+        .filter(models.User.telegram_id == telegram_id)
+        .first()
+    )
+
+    # Если не нашли — создаём
+    if user is None:
+        user = models.User(
+            telegram_id=telegram_id,
+            name=None,  # потом можно сделать команду /setname
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    # 3. Ищем его участие в какой-либо семье
+    membership = (
+        db.query(models.HouseholdMember)
+        .filter(models.HouseholdMember.user_id == user.id)
+        .first()
+    )
+
+    if membership:
+        household = membership.household
+    else:
+        # 4. Если ни в одной семье нет — создаём новую семью и привязываем его
+        household = models.Household(
+            name=f"Семья {telegram_id}",
+            currency="RUB",
+            privacy_mode="OPEN",
+        )
+        db.add(household)
+        db.commit()
+        db.refresh(household)
+
+        membership = models.HouseholdMember(
+            user_id=user.id,
+            household_id=household.id,
+            role="owner",
+        )
+        db.add(membership)
+        db.commit()
+
+    return user, household
 
 # -----------------------
 # СТАРТ ПРИЛОЖЕНИЯ
@@ -73,14 +134,16 @@ def health_check():
 def create_transaction(
     tx: schemas.TransactionCreate,
     db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
 ):
+
     """
     Создать транзакцию (расход или доход).
     kind:
       - "expense" (по умолчанию)
       - "income"
     """
-    household = get_or_create_default_household(db)
+    user, household = get_or_create_user_and_household(db, telegram_id)
 
     kind = (tx.kind or "expense").lower()
     if kind not in ("expense", "income"):
@@ -91,7 +154,7 @@ def create_transaction(
 
     db_tx = models.Transaction(
         household_id=household.id,
-        user_id=None,
+        user_id=user.id if user else None,
         amount=tx.amount,
         currency=tx.currency or household.currency,
         description=tx.description,
@@ -115,12 +178,19 @@ def list_transactions(
         description="Фильтр по типу: expense / income",
     ),
     db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
 ):
     """
     Список транзакций.
     Можно фильтровать по дате и по типу операции (расход/доход).
     """
-    query = db.query(models.Transaction)
+    # Определяем семью по telegram_id
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    # Берём только транзакции этой семьи
+    query = db.query(models.Transaction).filter(
+        models.Transaction.household_id == household.id
+    )
 
     if start_date:
         query = query.filter(models.Transaction.date >= start_date)
@@ -144,6 +214,7 @@ def list_transactions(
 def report_summary(
     days: int = Query(14, ge=1, le=365),
     db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
 ):
     """
     Краткий отчёт: СУММА РАСХОДОВ и разрез по категориям за N дней.
@@ -151,14 +222,18 @@ def report_summary(
     """
     since = datetime.utcnow() - timedelta(days=days)
 
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
     txs = (
         db.query(models.Transaction)
         .filter(
+            models.Transaction.household_id == household.id,
             models.Transaction.date >= since,
             models.Transaction.kind == "expense",
         )
         .all()
     )
+
 
     total_amount = float(sum(t.amount for t in txs)) if txs else 0.0
 
@@ -198,6 +273,7 @@ def report_summary(
 def report_balance(
     days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
 ):
     """
     Баланс за период:
@@ -207,11 +283,17 @@ def report_balance(
     """
     since = datetime.utcnow() - timedelta(days=days)
 
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
     txs = (
         db.query(models.Transaction)
-        .filter(models.Transaction.date >= since)
+        .filter(
+            models.Transaction.household_id == household.id,
+            models.Transaction.date >= since,
+        )
         .all()
     )
+
 
     expenses = float(
         sum(t.amount for t in txs if t.kind == "expense")
@@ -239,6 +321,7 @@ def report_balance(
 def export_transactions_csv(
     days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
 ):
     """
     Экспорт транзакций в CSV за последние N дней.
@@ -246,12 +329,18 @@ def export_transactions_csv(
 
     since = datetime.utcnow() - timedelta(days=days)
 
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
     txs = (
         db.query(models.Transaction)
-        .filter(models.Transaction.date >= since)
+        .filter(
+            models.Transaction.household_id == household.id,
+            models.Transaction.date >= since,
+        )
         .order_by(models.Transaction.date.asc())
         .all()
     )
+
 
     def generate():
         output = StringIO()
@@ -306,6 +395,7 @@ def export_transactions_csv(
 def parse_and_create_transaction(
     body: schemas.ParseTextRequest,
     db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
 ):
     """
     Парсит текст через YandexGPT, создаёт транзакцию и возвращает её.
@@ -337,11 +427,11 @@ def parse_and_create_transaction(
     else:
         date = datetime.utcnow()
 
-    household = get_or_create_default_household(db)
+    user, household = get_or_create_user_and_household(db, telegram_id)
 
     db_tx = models.Transaction(
         household_id=household.id,
-        user_id=None,
+        user_id=user.id if user else None,
         amount=amount,
         currency=currency,
         description=description,
@@ -377,7 +467,8 @@ def create_reminder(
     (Пока привязка к конкретному пользователю по telegram_id не используется,
     но параметр оставляем для бота.)
     """
-    household = get_or_create_default_household(db)
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
 
     next_run_at = rem.next_run_at
     if next_run_at is None and rem.interval_days:
@@ -386,7 +477,7 @@ def create_reminder(
 
     db_rem = models.Reminder(
         household_id=household.id,
-        user_id=None,
+        user_id=user.id if user else None,
         title=rem.title,
         amount=rem.amount,
         currency=rem.currency,
@@ -394,6 +485,7 @@ def create_reminder(
         next_run_at=next_run_at,
         is_active=True,
     )
+
 
     try:
         db.add(db_rem)
@@ -416,7 +508,11 @@ def list_reminders(
     Список напоминаний (по умолчанию только активные).
     Параметр telegram_id оставляем для совместимости с ботом.
     """
-    query = db.query(models.Reminder)
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    query = db.query(models.Reminder).filter(
+        models.Reminder.household_id == household.id
+    )
 
     if only_active:
         query = query.filter(models.Reminder.is_active.is_(True))
@@ -438,14 +534,16 @@ def reminders_due_today(
     """
     today = datetime.utcnow().date()
     tomorrow = today + timedelta(days=1)
-
+    user, household = get_or_create_user_and_household(db, telegram_id)
+    
     query = db.query(models.Reminder).filter(
+        models.Reminder.household_id == household.id,
         models.Reminder.is_active.is_(True),
         models.Reminder.next_run_at < datetime.combine(
             tomorrow, datetime.min.time()
         ),
     )
-
+    
     return query.order_by(models.Reminder.next_run_at.asc()).all()
 
 
