@@ -52,6 +52,30 @@ async def api_create_transaction(
         return resp.json()
 
 
+async def api_get_me(telegram_id: int):
+    """Получить информацию о пользователе и его семье (/me)."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{API_BASE_URL}/me",
+            params={"telegram_id": telegram_id},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def api_get_household(telegram_id: int):
+    """Получить информацию о семье (/household)."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{API_BASE_URL}/household",
+            params={"telegram_id": telegram_id},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def api_get_summary_report(telegram_id: int, days: int = 14):
     async with httpx.AsyncClient() as client:
         resp = await client.get(
@@ -250,6 +274,8 @@ async def main():
             "• /reminders — список напоминаний\n"
             "• /remind_today — что нужно оплатить сегодня\n"
             "• /remind_pay — отметить напоминание как оплачено\n"
+            "• /me — твой профиль и семья\n"
+            "• /family — информация о семье\n"
             "• /help — подсказка"
         )
 
@@ -260,6 +286,8 @@ async def main():
             "Доступные команды:\n"
             "/start — начать работу\n"
             "/help — помощь\n\n"
+            "/me — показать твой профиль и семью\n"
+            "/family — информация о семье\n\n"
             "/add СУММА описание — добавить расход вручную\n"
             "  пример: /add 2435 Пятёрочка продукты\n\n"
             "/income СУММА описание — добавить доход вручную\n"
@@ -276,6 +304,77 @@ async def main():
             "/remind_today — список платежей на сегодня\n"
             "/remind_pay ID — отметить напоминание как оплачено"
         )
+
+    # /me — кто я и какая семья
+    @dp.message(Command("me"))
+    async def cmd_me(message: Message):
+        telegram_id = message.from_user.id
+
+        try:
+            info = await api_get_me(telegram_id)
+        except Exception as e:
+            print(f"Ошибка /me: {e}")
+            await message.answer(
+                "Не получилось получить информацию о профиле 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        lines = [
+            "Твой профиль:",
+            f"Имя: {info.get('name') or 'без имени'}",
+            f"Telegram ID: {info.get('telegram_id')}",
+            "",
+            "Семья:",
+            f"Название: {info.get('household_name')}",
+            f"Валюта: {info.get('currency')}",
+            f"Приватность: {info.get('privacy_mode')}",
+            f"Твоя роль: {info.get('role')}",
+        ]
+
+        members = info.get("members") or []
+        if members:
+            lines.append("")
+            lines.append("Участники семьи:")
+            for m in members:
+                m_name = m.get("name") or "без имени"
+                role = m.get("role") or "member"
+                lines.append(f"- {m_name} ({role})")
+
+        await message.answer("\n".join(lines))
+
+    # /family — инфа только про семью
+    @dp.message(Command("family"))
+    async def cmd_family(message: Message):
+        telegram_id = message.from_user.id
+
+        try:
+            info = await api_get_household(telegram_id)
+        except Exception as e:
+            print(f"Ошибка /family: {e}")
+            await message.answer(
+                "Не получилось получить информацию о семье 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        lines = [
+            "Твоя семья:",
+            f"Название: {info.get('name')}",
+            f"Валюта: {info.get('currency')}",
+            f"Приватность: {info.get('privacy_mode')}",
+        ]
+
+        members = info.get("members") or []
+        if members:
+            lines.append("")
+            lines.append("Участники:")
+            for m in members:
+                m_name = m.get("name") or "без имени"
+                role = m.get("role") or "member"
+                lines.append(f"- {m_name} ({role})")
+
+        await message.answer("\n".join(lines))
 
     # /add — расход
     @dp.message(Command("add"))

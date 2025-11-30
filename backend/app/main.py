@@ -37,6 +37,7 @@ def get_or_create_default_household(db: Session) -> models.Household:
         db.refresh(household)
     return household
 
+
 def get_or_create_user_and_household(
     db: Session,
     telegram_id: int | None,
@@ -99,6 +100,7 @@ def get_or_create_user_and_household(
 
     return user, household
 
+
 # -----------------------
 # СТАРТ ПРИЛОЖЕНИЯ
 # -----------------------
@@ -126,6 +128,202 @@ def health_check():
 
 
 # -----------------------
+# ПОЛЬЗОВАТЕЛЬ И СЕМЬЯ
+# -----------------------
+
+
+@app.get("/me", response_model=schemas.MeResponse)
+def get_me(
+    telegram_id: int | None = Query(
+        default=None,
+        description="Telegram ID пользователя (для вызовов из бота)",
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Информация о текущем пользователе и его семье.
+    """
+
+    if telegram_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="telegram_id is required for /me",
+        )
+
+    # Находим или создаём пользователя по telegram_id
+    user = (
+        db.query(models.User)
+        .filter(models.User.telegram_id == telegram_id)
+        .first()
+    )
+    if user is None:
+        user = models.User(telegram_id=telegram_id)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    # Проверяем, есть ли у него семья
+    membership = (
+        db.query(models.HouseholdMember)
+        .filter(models.HouseholdMember.user_id == user.id)
+        .first()
+    )
+
+    if membership is None:
+        # Создаём новую семью и привязываем пользователя как owner
+        household = models.Household(
+            name=f"Семья {telegram_id}",
+            currency="RUB",
+            privacy_mode="OPEN",
+        )
+        db.add(household)
+        db.commit()
+        db.refresh(household)
+
+        membership = models.HouseholdMember(
+            household_id=household.id,
+            user_id=user.id,
+            role="owner",
+        )
+        db.add(membership)
+        db.commit()
+        db.refresh(membership)
+    else:
+        household = (
+            db.query(models.Household)
+            .filter(models.Household.id == membership.household_id)
+            .first()
+        )
+        if household is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Household not found for membership",
+            )
+
+    # Собираем всех участников семьи
+    member_rows = (
+        db.query(models.HouseholdMember)
+        .join(models.User, models.HouseholdMember.user_id == models.User.id)
+        .filter(models.HouseholdMember.household_id == household.id)
+        .all()
+    )
+
+    members = [
+        schemas.MemberShort(
+            id=m.user.id,
+            name=m.user.name,
+            telegram_id=m.user.telegram_id,
+            role=m.role,
+        )
+        for m in member_rows
+    ]
+
+    return schemas.MeResponse(
+        user_id=user.id,
+        telegram_id=user.telegram_id,
+        name=user.name,
+        household_id=household.id,
+        household_name=household.name,
+        currency=household.currency,
+        privacy_mode=household.privacy_mode,
+        role=membership.role,
+        members=members,
+    )
+
+
+@app.get("/household", response_model=schemas.HouseholdInfo)
+def get_household(
+    telegram_id: int | None = Query(
+        default=None,
+        description="Telegram ID пользователя (для вызовов из бота)",
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Информация только о семье (без деталей по самому пользователю).
+    """
+
+    if telegram_id is None:
+        # Для Swagger можно оставить без telegram_id, но из бота он всегда есть.
+        # В таком случае просто берём первую семью.
+        household = db.query(models.Household).first()
+        if household is None:
+            raise HTTPException(status_code=404, detail="Household not found")
+    else:
+        # Повторяем ту же логику, что и в /me
+        user = (
+            db.query(models.User)
+            .filter(models.User.telegram_id == telegram_id)
+            .first()
+        )
+        if user is None:
+            user = models.User(telegram_id=telegram_id)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+        membership = (
+            db.query(models.HouseholdMember)
+            .filter(models.HouseholdMember.user_id == user.id)
+            .first()
+        )
+
+        if membership is None:
+            household = models.Household(
+                name=f"Семья {telegram_id}",
+                currency="RUB",
+                privacy_mode="OPEN",
+            )
+            db.add(household)
+            db.commit()
+            db.refresh(household)
+
+            membership = models.HouseholdMember(
+                household_id=household.id,
+                user_id=user.id,
+                role="owner",
+            )
+            db.add(membership)
+            db.commit()
+        else:
+            household = (
+                db.query(models.Household)
+                .filter(models.Household.id == membership.household_id)
+                .first()
+            )
+            if household is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Household not found for membership",
+                )
+
+    member_rows = (
+        db.query(models.HouseholdMember)
+        .join(models.User, models.HouseholdMember.user_id == models.User.id)
+        .filter(models.HouseholdMember.household_id == household.id)
+        .all()
+    )
+
+    members = [
+        schemas.MemberShort(
+            id=m.user.id,
+            name=m.user.name,
+            telegram_id=m.user.telegram_id,
+            role=m.role,
+        )
+        for m in member_rows
+    ]
+
+    return schemas.HouseholdInfo(
+        id=household.id,
+        name=household.name,
+        currency=household.currency,
+        privacy_mode=household.privacy_mode,
+        members=members,
+    )
+
+
+# -----------------------
 # ТРАНЗАКЦИИ
 # -----------------------
 
@@ -136,7 +334,6 @@ def create_transaction(
     db: Session = Depends(get_db),
     telegram_id: int | None = Query(default=None),
 ):
-
     """
     Создать транзакцию (расход или доход).
     kind:
@@ -224,6 +421,7 @@ def report_summary(
 
     user, household = get_or_create_user_and_household(db, telegram_id)
 
+    # Берём только расходы этой семьи
     txs = (
         db.query(models.Transaction)
         .filter(
@@ -234,15 +432,16 @@ def report_summary(
         .all()
     )
 
-
     total_amount = float(sum(t.amount for t in txs)) if txs else 0.0
 
+    # Суммируем по категориям только внутри этой семьи
     rows = (
         db.query(
             models.Transaction.category,
             func.sum(models.Transaction.amount).label("total"),
         )
         .filter(
+            models.Transaction.household_id == household.id,
             models.Transaction.date >= since,
             models.Transaction.kind == "expense",
         )
@@ -294,13 +493,8 @@ def report_balance(
         .all()
     )
 
-
-    expenses = float(
-        sum(t.amount for t in txs if t.kind == "expense")
-    )
-    incomes = float(
-        sum(t.amount for t in txs if t.kind == "income")
-    )
+    expenses = float(sum(t.amount for t in txs if t.kind == "expense"))
+    incomes = float(sum(t.amount for t in txs if t.kind == "income"))
 
     currency = "RUB"
     if txs:
@@ -326,7 +520,6 @@ def export_transactions_csv(
     """
     Экспорт транзакций в CSV за последние N дней.
     """
-
     since = datetime.utcnow() - timedelta(days=days)
 
     user, household = get_or_create_user_and_household(db, telegram_id)
@@ -340,7 +533,6 @@ def export_transactions_csv(
         .order_by(models.Transaction.date.asc())
         .all()
     )
-
 
     def generate():
         output = StringIO()
@@ -469,7 +661,6 @@ def create_reminder(
     """
     user, household = get_or_create_user_and_household(db, telegram_id)
 
-
     next_run_at = rem.next_run_at
     if next_run_at is None and rem.interval_days:
         # если не указана конкретная дата — берём сегодня
@@ -485,7 +676,6 @@ def create_reminder(
         next_run_at=next_run_at,
         is_active=True,
     )
-
 
     try:
         db.add(db_rem)
@@ -534,8 +724,9 @@ def reminders_due_today(
     """
     today = datetime.utcnow().date()
     tomorrow = today + timedelta(days=1)
+
     user, household = get_or_create_user_and_household(db, telegram_id)
-    
+
     query = db.query(models.Reminder).filter(
         models.Reminder.household_id == household.id,
         models.Reminder.is_active.is_(True),
@@ -543,7 +734,7 @@ def reminders_due_today(
             tomorrow, datetime.min.time()
         ),
     )
-    
+
     return query.order_by(models.Reminder.next_run_at.asc()).all()
 
 
@@ -560,9 +751,11 @@ def mark_reminder_paid(
     Если интервал не задан — деактивируем напоминание.
     Если интервал есть — сдвигаем next_run_at на interval_days вперёд.
     """
-    rem = db.query(models.Reminder).filter(
-        models.Reminder.id == reminder_id
-    ).first()
+    rem = (
+        db.query(models.Reminder)
+        .filter(models.Reminder.id == reminder_id)
+        .first()
+    )
 
     if rem is None:
         raise HTTPException(status_code=404, detail="Reminder not found")

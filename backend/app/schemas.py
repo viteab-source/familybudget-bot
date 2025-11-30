@@ -96,6 +96,42 @@ class ReminderRead(ReminderBase):
 
 
 # -----------------------
+# ПОЛЬЗОВАТЕЛЬ И СЕМЬЯ
+# -----------------------
+
+
+class MemberShort(BaseModel):
+    """Краткая информация об участнике семьи."""
+    id: int
+    name: Optional[str] = None
+    telegram_id: Optional[int] = None
+    role: str
+
+
+class MeResponse(BaseModel):
+    """Ответ для /me: кто я, какая семья и кто в ней."""
+    user_id: int
+    telegram_id: Optional[int] = None
+    name: Optional[str] = None
+
+    household_id: int
+    household_name: str
+    currency: str
+    privacy_mode: str
+    role: str  # роль текущего пользователя в семье
+    members: List[MemberShort]
+
+
+class HouseholdInfo(BaseModel):
+    """Информация о семье и участниках (для /household)."""
+    id: int
+    name: str
+    currency: str
+    privacy_mode: str
+    members: List[MemberShort]
+
+
+# -----------------------
 # ВСПОМОГАТЕЛЬНОЕ
 # -----------------------
 
