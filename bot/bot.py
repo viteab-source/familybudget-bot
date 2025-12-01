@@ -226,6 +226,21 @@ async def api_rename_category(telegram_id: int, old_name: str, new_name: str):
         resp.raise_for_status()
         return resp.json()
 
+async def api_merge_categories(telegram_id: int, source_name: str, target_name: str):
+    """Слить категории: source -> target."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{API_BASE_URL}/categories/merge",
+            params={
+                "telegram_id": telegram_id,
+                "source_name": source_name,
+                "target_name": target_name,
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
 async def api_parse_and_create(telegram_id: int, text: str):
     """Разбор свободного текста через YandexGPT + создание транзакции (расход)."""
     async with httpx.AsyncClient() as client:
@@ -522,6 +537,7 @@ async def main():
             "/categories — список категорий\n"
             "/setcat НАЗВАНИЕ — задать категорию для последнего расхода\n\n"
             "/cat_rename СТАРОЕ НОВОЕ — переименовать категорию\n\n"
+            "/cat_merge СТАРАЯ НОВАЯ — объединить категории\n\n"
             "Напоминания:\n"
             "/remind_add НАЗВАНИЕ СУММА ДНЕЙ\n"
             "  пример: /remind_add Коммуналка 8000 30\n"
@@ -1514,6 +1530,75 @@ async def main():
         await message.answer(
             f"Готово ✅\n"
             f"Категория переименована в «{cat.get('name') or new_name}»."
+        )
+
+    # /cat_merge СТАРАЯ НОВАЯ — объединить категории
+    @dp.message(Command("cat_merge"))
+    async def cmd_cat_merge(message: Message):
+        text = message.text or ""
+        parts = text.split(maxsplit=3)
+
+        # parts: ["/cat_merge", "Старая", "Новая", ...]
+        if len(parts) < 3:
+            await message.answer(
+                "Формат:\n"
+                "/cat_merge СТАРАЯ НОВАЯ\n\n"
+                "Пример:\n"
+                "/cat_merge Игрушки Детям"
+            )
+            return
+
+        source_name = parts[1].strip()
+        target_name = parts[2].strip()
+
+        if not source_name or not target_name:
+            await message.answer(
+                "Старое и новое название не могут быть пустыми.\n"
+                "Пример: /cat_merge Игрушки Детям"
+            )
+            return
+
+        telegram_id = message.from_user.id
+
+        try:
+            cat = await api_merge_categories(
+                telegram_id=telegram_id,
+                source_name=source_name,
+                target_name=target_name,
+            )
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                data = e.response.json()
+                detail = data.get("detail") or ""
+            except Exception:
+                pass
+
+            if e.response.status_code == 404:
+                await message.answer(detail or "Старая категория не найдена.")
+                return
+            if e.response.status_code == 400:
+                await message.answer(detail or "Некорректные данные.")
+                return
+
+            print(f"HTTP ошибка /cat_merge: {detail or e}")
+            await message.answer(
+                "Не получилось объединить категории 😔\n"
+                "Попробуй позже."
+            )
+            return
+        except Exception as e:
+            print(f"Ошибка /cat_merge: {e}")
+            await message.answer(
+                "Не получилось объединить категории 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        await message.answer(
+            "Готово ✅\n"
+            f"Категория «{source_name}» объединена с «{cat.get('name') or target_name}».\n"
+            "Все расходы перенесены."
         )
 
     # /balance — баланс доходы/расходы

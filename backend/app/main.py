@@ -1204,6 +1204,100 @@ def rename_category(
     db.refresh(cat)
     return cat
 
+@app.post("/categories/merge", response_model=schemas.CategoryRead)
+def merge_categories(
+    source_name: str = Query(..., description="Какую категорию объединяем (будет удалена)"),
+    target_name: str = Query(..., description="В какую категорию переносим все данные"),
+    db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
+):
+    """
+    Слить две категории внутри текущей семьи.
+
+    Все транзакции из source -> в target.
+    source категория удаляется.
+    """
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    source_name_clean = (source_name or "").strip()
+    target_name_clean = (target_name or "").strip()
+
+    if not source_name_clean or not target_name_clean:
+        raise HTTPException(
+            status_code=400,
+            detail="Старое и новое название категории не могут быть пустыми",
+        )
+
+    if source_name_clean.lower() == target_name_clean.lower():
+        raise HTTPException(
+            status_code=400,
+            detail="Нельзя объединить категорию саму с собой",
+        )
+
+    # 1. Ищем source категорию
+    source_cat = (
+        db.query(models.Category)
+        .filter(
+            models.Category.household_id == household.id,
+            func.lower(models.Category.name) == func.lower(source_name_clean),
+        )
+        .first()
+    )
+    if not source_cat:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Категория «{source_name_clean}» не найдена",
+        )
+
+    # 2. Ищем/создаём target категорию
+    target_cat = (
+        db.query(models.Category)
+        .filter(
+            models.Category.household_id == household.id,
+            func.lower(models.Category.name) == func.lower(target_name_clean),
+        )
+        .first()
+    )
+    if not target_cat:
+        target_cat = models.Category(
+            household_id=household.id,
+            name=target_name_clean,
+        )
+        db.add(target_cat)
+        db.flush()  # чтобы получить id
+
+    # 3. Переносим транзакции из source в target
+    db.query(models.Transaction).filter(
+        models.Transaction.household_id == household.id,
+        models.Transaction.category_id == source_cat.id,
+    ).update(
+        {
+            "category_id": target_cat.id,
+            "category": target_cat.name,
+        },
+        synchronize_session=False,
+    )
+
+    # На всякий случай обновим транзакции, где category строкой совпадает
+    db.query(models.Transaction).filter(
+        models.Transaction.household_id == household.id,
+        models.Transaction.category_id.is_(None),
+        func.lower(models.Transaction.category) == func.lower(source_name_clean),
+    ).update(
+        {
+            "category_id": target_cat.id,
+            "category": target_cat.name,
+        },
+        synchronize_session=False,
+    )
+
+    # 4. Удаляем старую категорию
+    db.delete(source_cat)
+
+    db.commit()
+    db.refresh(target_cat)
+    return target_cat
+
 @app.post("/transactions/set-category-last", response_model=schemas.TransactionRead)
 def set_last_transaction_category(
     category: str = Query(..., description="Новое название категории"),
