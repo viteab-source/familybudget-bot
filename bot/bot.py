@@ -1,6 +1,7 @@
 import asyncio
 import os
 from datetime import datetime
+import logging
 
 import httpx
 from aiogram import Bot, Dispatcher, F
@@ -10,11 +11,24 @@ from dotenv import load_dotenv
 
 # Загружаем переменные окружения из .env
 load_dotenv()
+logger = logging.getLogger("familybudget_bot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 
+
+# Пользователи, которые сейчас подтверждают выход из семьи
+pending_family_leave_confirmations: set[int] = set()
+
+
+async def _clear_family_leave_confirmation(user_id: int, delay_seconds: int = 60):
+    """
+    Через delay_seconds секунд убираем запрос на подтверждение,
+    если пользователь ничего не сделал.
+    """
+    await asyncio.sleep(delay_seconds)
+    pending_family_leave_confirmations.discard(user_id)
 
 # -----------------------
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ API
@@ -115,6 +129,17 @@ async def api_rename_household(telegram_id: int, name: str):
         resp.raise_for_status()
         return resp.json()
 
+async def api_leave_household(telegram_id: int):
+    """Выйти из семьи для данного пользователя."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{API_BASE_URL}/household/leave",
+            params={"telegram_id": telegram_id},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
 async def api_set_name(telegram_id: int, name: str):
     """Установить имя пользователя (display name)."""
     async with httpx.AsyncClient() as client:
@@ -149,6 +174,42 @@ async def api_get_balance_report(telegram_id: int, days: int = 30):
         resp.raise_for_status()
         return resp.json()
 
+async def api_get_members_report(telegram_id: int, days: int = 30):
+    """Отчёт по людям (расходы по каждому участнику семьи)."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{API_BASE_URL}/report/members",
+            params={"days": days, "telegram_id": telegram_id},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+async def api_get_categories(telegram_id: int):
+    """Получить список категорий текущей семьи."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{API_BASE_URL}/categories",
+            params={"telegram_id": telegram_id},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def api_set_last_transaction_category(telegram_id: int, category: str):
+    """Поменять категорию у последней транзакции пользователя."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{API_BASE_URL}/transactions/set-category-last",
+            params={
+                "telegram_id": telegram_id,
+                "category": category,
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 async def api_parse_and_create(telegram_id: int, text: str):
     """Разбор свободного текста через YandexGPT + создание транзакции (расход)."""
@@ -300,10 +361,18 @@ async def stt_recognize_ogg(data: bytes, lang: str = "ru-RU") -> str:
 # ОСНОВНАЯ ЛОГИКА БОТА
 # -----------------------
 
-
 async def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN не найден. Проверь файл .env")
+
+    # Настраиваем логирование
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    logger.info("==== Запуск FamilyBudget Bot ====")
+    logger.info(f"API_BASE_URL = {API_BASE_URL}")
 
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
@@ -311,6 +380,77 @@ async def main():
     # /start
     @dp.message(CommandStart())
     async def cmd_start(message: Message):
+        """
+        /start
+
+        1) Обычный старт — показывает помощь.
+        2) Если пришёл deep-link вида `/start join_XXXX`,
+           бот сразу пытается присоединить пользователя к семье по коду.
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+
+        # Проверяем, есть ли payload после /start
+        if len(parts) > 1:
+            payload = parts[1].strip()
+            # Ожидаем формат join_ABCD123
+            if payload.startswith("join_") and len(payload) > len("join_"):
+                code = payload[len("join_") :].strip()
+                telegram_id = message.from_user.id
+
+                try:
+                    info = await api_join_household(telegram_id, code)
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 404:
+                        await message.answer(
+                            "Приглашение с таким кодом не найдено "
+                            "или уже устарело 😔"
+                        )
+                        return
+                    if e.response.status_code == 400:
+                        await message.answer("Неверный код приглашения 😔")
+                        return
+
+                    print(f"HTTP ошибка /start join_: {e}")
+                    await message.answer(
+                        "Не получилось присоединиться к семье 😔\n"
+                        "Попробуй позже."
+                    )
+                    return
+                except Exception as e:
+                    print(f"Ошибка /start join_: {e}")
+                    await message.answer(
+                        "Не получилось присоединиться к семье 😔\n"
+                        "Попробуй позже."
+                    )
+                    return
+
+                # Успешно присоединили к семье — показываем состав семьи
+                members = info.get("members") or []
+                member_lines = []
+                for m in members:
+                    m_name = m.get("name") or "без имени"
+                    role = m.get("role") or "member"
+                    member_lines.append(f"- {m_name} ({role})")
+
+                msg_lines = [
+                    "Готово! 🎉",
+                    f"Ты теперь в семье: {info.get('name')}",
+                ]
+                if member_lines:
+                    msg_lines.append("")
+                    msg_lines.append("Сейчас в семье:")
+                    msg_lines.extend(member_lines)
+
+                msg_lines.append(
+                    "\nЧтобы в списке семьи было видно твоё имя, "
+                    "отправь команду:\n/setname ТвоёИмя"
+                )
+
+                await message.answer("\n".join(msg_lines))
+                return  # чтобы не выводить приветствие второй раз
+
+        # Обычное приветствие, если это просто /start без кода
         await message.answer(
             "Привет! 👋\n"
             "Я FamilyBudget Bot.\n\n"
@@ -353,6 +493,7 @@ async def main():
             "/family_invite — пригласить в семью (даёт код)\n"
             "/family_join КОД — присоединиться к семье по коду\n"
             "/family_rename НАЗВАНИЕ — переименовать семью\n\n"
+            "/family_leave — выйти из семьи\n"            
             "/add СУММА описание — добавить расход вручную\n"
             "  пример: /add 2435 Пятёрочка продукты\n\n"
             "/income СУММА описание — добавить доход вручную\n"
@@ -360,8 +501,11 @@ async def main():
             "/aiadd ТЕКСТ — добавить расход через ИИ (YandexGPT)\n"
             "  пример: /aiadd Перекрёсток продукты 2435₽ вчера\n\n"
             "/report [дней] — отчёт по расходам (по умолчанию 14)\n"
+            "/report_members [дней] — кто сколько потратил (по умолчанию 30)\n"       
             "/balance [дней] — баланс доходы/расходы (по умолчанию 30)\n"
             "/export [дней] — экспорт в CSV (по умолчанию 30)\n\n"
+            "/categories — список категорий\n"
+            "/setcat НАЗВАНИЕ — задать категорию для последнего расхода\n\n"
             "Напоминания:\n"
             "/remind_add НАЗВАНИЕ СУММА ДНЕЙ\n"
             "  пример: /remind_add Коммуналка 8000 30\n"
@@ -480,6 +624,13 @@ async def main():
     # /family_invite — получить код семьи
     @dp.message(Command("family_invite"))
     async def cmd_family_invite(message: Message):
+        """
+        /family_invite
+
+        Даёт:
+        - короткий код приглашения
+        - (если возможно) ссылку вида https://t.me/Бот?start=join_КОД
+        """
         telegram_id = message.from_user.id
 
         try:
@@ -493,12 +644,32 @@ async def main():
             return
 
         code = data.get("code")
-        await message.answer(
-            "Приглашение в семью:\n\n"
-            f"Код: {code}\n\n"
-            "Пусть второй человек отправит боту команду:\n"
-            f"/family_join {code}"
-        )
+
+        # Пытаемся собрать ссылку-приглашение
+        invite_link = None
+        try:
+            me = await message.bot.get_me()
+            if me.username:
+                invite_link = f"https://t.me/{me.username}?start=join_{code}"
+        except Exception as e:
+            print(f"Ошибка при получении username бота: {e}")
+
+        lines = [
+            "Приглашение в семью:",
+            "",
+            f"Код: {code}",
+            "",
+            "Пусть второй человек отправит боту команду:",
+            f"/family_join {code}",
+        ]
+
+        if invite_link:
+            lines.append("")
+            lines.append("Или просто перейдёт по ссылке:")
+            lines.append(invite_link)
+
+        await message.answer("\n".join(lines))
+
 
     # /family_join КОД — присоединиться к семье
     @dp.message(Command("family_join"))
@@ -613,6 +784,81 @@ async def main():
             f"Готово ✅\n"
             f"Новое название семьи: {info.get('name')}"
         )
+
+    # /family_leave — выйти из семьи (с подтверждением)
+    @dp.message(Command("family_leave"))
+    async def cmd_family_leave(message: Message):
+        telegram_id = message.from_user.id
+
+        # Первый вызов — только предупреждение и запрос подтверждения
+        if telegram_id not in pending_family_leave_confirmations:
+            pending_family_leave_confirmations.add(telegram_id)
+            # Через минуту очистим запрос, если пользователь передумал
+            asyncio.create_task(
+                _clear_family_leave_confirmation(telegram_id, delay_seconds=60)
+            )
+
+            await message.answer(
+                "⚠ Внимание!\n\n"
+                "Если ты сейчас выйдешь из семьи, то:\n"
+                "• семья будет удалена (если ты в ней один и ты владелец);\n"
+                "• будут удалены все расходы, доходы, напоминания и инвайты этой семьи.\n\n"
+                "Если ты ТОЧНО хочешь выйти и всё удалить — "
+                "ещё раз отправь команду:\n/family_leave\n"
+                "Команда действительна в течение 1 минуты."
+            )
+            return
+
+        # Второй вызов — уже настоящее выполнение
+        # (и мы сразу убираем флаг подтверждения)
+        pending_family_leave_confirmations.discard(telegram_id)
+
+        try:
+            data = await api_leave_household(telegram_id)
+        except httpx.HTTPStatusError as e:
+            # Обрабатываем ожидаемые ошибки
+            try:
+                detail = e.response.json().get("detail", "")
+            except Exception:
+                detail = ""
+
+            if e.response.status_code == 400:
+                if "no household" in detail:
+                    await message.answer("Ты и так ни в какой семье не состоишь 🙂")
+                    return
+                if "Owner не может" in detail:
+                    await message.answer(
+                        "Ты владелец семьи и в ней есть другие участники.\n"
+                        "Сначала передай права или удали участников."
+                    )
+                    return
+                await message.answer(detail or "Некорректный запрос.")
+                return
+
+            if e.response.status_code == 404:
+                await message.answer(
+                    "Не получилось найти пользователя или семью 😔"
+                )
+                return
+
+            print(f"HTTP ошибка /family_leave: {e}")
+            await message.answer(
+                "Не получилось выйти из семьи 😔\n"
+                "Попробуй позже."
+            )
+            return
+        except Exception as e:
+            print(f"Ошибка /family_leave: {e}")
+            await message.answer(
+                "Не получилось выйти из семьи 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        msg = data.get("message") or "Ты вышел из семьи."
+        await message.answer(msg)
+
+    
 
     # /add — расход
     @dp.message(Command("add"))
@@ -954,6 +1200,29 @@ async def main():
 
         try:
             tx = await api_parse_and_create(telegram_id=telegram_id, text=raw_text)
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                data = e.response.json()
+                detail = data.get("detail") or ""
+            except Exception:
+                pass
+
+            print(f"HTTP ошибка при разборе текста через ИИ: {detail or e}")
+
+            if isinstance(detail, str) and "Некорректная сумма" in detail:
+                await message.answer(
+                    "Похоже, я не увидел сумму в этом сообщении 🤔\n"
+                    "Добавь число и валюту. Примеры:\n"
+                    "• КБ Макс игрушки 750\n"
+                    "• Перекрёсток продукты 2435₽ вчера"
+                )
+            else:
+                await message.answer(
+                    "Не получилось разобрать расход через ИИ 😔\n"
+                    "Попробуй переформулировать сообщение или используй /add."
+                )
+            return
         except Exception as e:
             print(f"Ошибка при разборе свободного текста через ИИ: {e}")
             await message.answer(
@@ -1014,6 +1283,154 @@ async def main():
             lines.append(f"- {cat}: {amt:.2f} {currency}")
 
         await message.answer("\n".join(lines))
+
+    # /report_members — расходы по людям
+    @dp.message(Command("report_members"))
+    async def cmd_report_members(message: Message):
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+
+        days = 30
+        if len(parts) == 2:
+            try:
+                days = int(parts[1])
+            except ValueError:
+                await message.answer(
+                    "Не понял количество дней. Пример: /report_members 30"
+                )
+                return
+
+        telegram_id = message.from_user.id
+
+        try:
+            report = await api_get_members_report(
+                telegram_id=telegram_id,
+                days=days,
+            )
+        except Exception as e:
+            print(f"Ошибка при получении отчёта по людям: {e}")
+            await message.answer(
+                "Не получилось получить отчёт по людям 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        members = report.get("members") or []
+        currency = report.get("currency", "RUB")
+
+        if not members:
+            await message.answer(
+                f"За последние {days} дней расходов по людям нет 🙂"
+            )
+            return
+
+        lines = [
+            f"Расходы по людям за последние {days} дней:",
+            "",
+        ]
+
+        for m in members:
+            name = m.get("name") or "Без имени"
+            amount = m.get("amount", 0.0)
+            lines.append(f"- {name}: {amount:.2f} {currency}")
+
+        await message.answer("\n".join(lines))
+
+    # /categories — список категорий семьи
+    @dp.message(Command("categories"))
+    async def cmd_categories(message: Message):
+        telegram_id = message.from_user.id
+
+        try:
+            cats = await api_get_categories(telegram_id)
+        except Exception as e:
+            print(f"Ошибка при получении категорий: {e}")
+            await message.answer(
+                "Не получилось получить категории 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        if not cats:
+            await message.answer(
+                "Пока нет сохранённых категорий.\n"
+                "Они появятся, когда ты будешь задавать их через /setcat."
+            )
+            return
+
+        lines = ["Категории твоей семьи:", ""]
+        for c in cats:
+            name = c.get("name") or "без названия"
+            lines.append(f"- {name}")
+
+        await message.answer("\n".join(lines))
+
+    # /setcat НАЗВАНИЕ — задать категорию для последнего расхода
+    @dp.message(Command("setcat"))
+    async def cmd_setcat(message: Message):
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+
+        if len(parts) < 2:
+            await message.answer(
+                "Напиши название категории.\n"
+                "Пример: /setcat Продукты"
+            )
+            return
+
+        category_name = parts[1].strip()
+        if not category_name:
+            await message.answer(
+                "Название категории не может быть пустым.\n"
+                "Пример: /setcat Продукты"
+            )
+            return
+
+        telegram_id = message.from_user.id
+
+        try:
+            tx = await api_set_last_transaction_category(
+                telegram_id=telegram_id,
+                category=category_name,
+            )
+        except httpx.HTTPStatusError as e:
+            try:
+                detail = e.response.json().get("detail", "")
+            except Exception:
+                detail = ""
+
+            if e.response.status_code == 404:
+                await message.answer(
+                    "У тебя ещё нет транзакций — нечему задавать категорию 🙂"
+                )
+                return
+            if e.response.status_code == 400:
+                await message.answer(detail or "Некорректное название категории.")
+                return
+
+            print(f"HTTP ошибка /setcat: {e}")
+            await message.answer(
+                "Не получилось сохранить категорию 😔\n"
+                "Попробуй позже."
+            )
+            return
+        except Exception as e:
+            print(f"Ошибка /setcat: {e}")
+            await message.answer(
+                "Не получилось сохранить категорию 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        cat = tx.get("category") or category_name
+        amount = tx.get("amount", 0.0)
+        currency = tx.get("currency", "RUB")
+
+        await message.answer(
+            f"Готово ✅\n"
+            f"Последний расход теперь в категории «{cat}» "
+            f"({amount:.2f} {currency})."
+        )
 
     # /balance — баланс доходы/расходы
     @dp.message(Command("balance"))
@@ -1161,6 +1578,28 @@ async def main():
 
         try:
             tx = await api_parse_and_create(telegram_id=telegram_id, text=text)
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                data = e.response.json()
+                detail = data.get("detail") or ""
+            except Exception:
+                pass
+
+            print(f"HTTP ошибка при разборе свободного текста через ИИ: {detail or e}")
+
+            if isinstance(detail, str) and "Некорректная сумма" in detail:
+                await message.answer(
+                    "Похоже, я не увидел сумму в этом сообщении 🤔\n"
+                    "Добавь число и валюту. Пример:\n"
+                    "КБ Макс игрушки 750"
+                )
+            else:
+                await message.answer(
+                    "Не получилось разобрать это сообщение как расход 😔\n"
+                    "Попробуй переформулировать или используй команду /aiadd."
+                )
+            return
         except Exception as e:
             print(f"Ошибка при разборе свободного текста через ИИ: {e}")
             await message.answer(
@@ -1170,10 +1609,13 @@ async def main():
             return
 
         await send_tx_confirmation(message, tx, text, via_ai=True)
+    # Запускаем бесконечный цикл обработки апдейтов от Telegram
+    logger.info("Бот запущен, ждём сообщения... Нажми Ctrl+C чтобы остановить.")
 
-    print("Бот запущен. Нажми Ctrl+C, чтобы остановить.")
-    await dp.start_polling(bot)
-
+    try:
+        await dp.start_polling(bot)
+    finally:
+        logger.info("Бот остановлен.")
 
 async def send_tx_confirmation(
     message: Message,
