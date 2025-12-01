@@ -1298,6 +1298,97 @@ def merge_categories(
     db.refresh(target_cat)
     return target_cat
 
+@app.post("/budget/set", response_model=dict)
+def set_budget(
+    category_name: str = Query(..., description="Название категории"),
+    limit_amount: float = Query(..., description="Лимит на месяц"),
+    db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
+):
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    now = datetime.utcnow()
+    period_month = now.strftime("%Y-%m")
+
+    category = (
+        db.query(models.Category)
+        .filter(
+            models.Category.household_id == household.id,
+            func.lower(models.Category.name) == func.lower(category_name),
+        )
+        .first()
+    )
+    if not category:
+        raise HTTPException(status_code=404, detail=f"Категория «{category_name}» не найдена")
+
+    budget = (
+        db.query(models.CategoryBudget)
+        .filter(
+            models.CategoryBudget.household_id == household.id,
+            models.CategoryBudget.category_id == category.id,
+            models.CategoryBudget.period_month == period_month,
+        )
+        .first()
+    )
+
+    if not budget:
+        budget = models.CategoryBudget(
+            household_id=household.id,
+            category_id=category.id,
+            limit_amount=limit_amount,
+            period_month=period_month,
+        )
+        db.add(budget)
+    else:
+        budget.limit_amount = limit_amount
+
+    db.commit()
+    return {"ok": True, "category": category.name, "limit": limit_amount, "period": period_month}
+
+@app.get("/budget/status", response_model=dict)
+def budget_status(
+    db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
+):
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    now = datetime.utcnow()
+    period_month = now.strftime("%Y-%m")
+
+    budgets = (
+        db.query(models.CategoryBudget)
+        .filter(
+            models.CategoryBudget.household_id == household.id,
+            models.CategoryBudget.period_month == period_month,
+        )
+        .all()
+    )
+
+    result = []
+    for b in budgets:
+        spent = (
+            db.query(func.sum(models.Transaction.amount))
+            .filter(
+                models.Transaction.household_id == household.id,
+                models.Transaction.category_id == b.category_id,
+                models.Transaction.kind == "expense",
+                func.strftime("%Y-%m", models.Transaction.date) == period_month,
+            )
+            .scalar()
+            or 0
+        )
+        percent = round((spent / b.limit_amount) * 100, 1) if b.limit_amount > 0 else 0
+        result.append(
+            {
+                "category": b.category.name,
+                "limit": b.limit_amount,
+                "spent": spent,
+                "percent": percent,
+            }
+        )
+
+    return {"month": period_month, "budgets": result}
+
 @app.post("/transactions/set-category-last", response_model=schemas.TransactionRead)
 def set_last_transaction_category(
     category: str = Query(..., description="Новое название категории"),
