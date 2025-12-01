@@ -76,6 +76,58 @@ async def api_get_household(telegram_id: int):
         return resp.json()
 
 
+async def api_get_household_invite(telegram_id: int):
+    """Получить код приглашения в семью."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{API_BASE_URL}/household/invite",
+            params={"telegram_id": telegram_id},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def api_join_household(telegram_id: int, code: str):
+    """Присоединиться к семье по коду."""
+    async with httpx.AsyncClient() as client:
+        payload = {"code": code}
+        resp = await client.post(
+            f"{API_BASE_URL}/household/join",
+            params={"telegram_id": telegram_id},
+            json=payload,
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def api_rename_household(telegram_id: int, name: str):
+    """Переименовать семью."""
+    async with httpx.AsyncClient() as client:
+        payload = {"name": name}
+        resp = await client.post(
+            f"{API_BASE_URL}/household/rename",
+            params={"telegram_id": telegram_id},
+            json=payload,
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+async def api_set_name(telegram_id: int, name: str):
+    """Установить имя пользователя (display name)."""
+    async with httpx.AsyncClient() as client:
+        payload = {"name": name}
+        resp = await client.post(
+            f"{API_BASE_URL}/user/set-name",
+            params={"telegram_id": telegram_id},
+            json=payload,
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
 async def api_get_summary_report(telegram_id: int, days: int = 14):
     async with httpx.AsyncClient() as client:
         resp = await client.get(
@@ -262,7 +314,13 @@ async def main():
         await message.answer(
             "Привет! 👋\n"
             "Я FamilyBudget Bot.\n\n"
-            "Сейчас я умею:\n"
+            "Для начала давай настроимся:\n"
+            "1️⃣ Как тебя называть — команда:\n"
+            "   /setname ТвоёИмя\n"
+            "   пример: /setname Витя\n\n"
+            "2️⃣ Как назвать семью — команда:\n"
+            "   /family_rename Наша семья\n\n"
+            "Дальше что я умею:\n"
             "• просто напиши: Перекрёсток продукты 2435₽ вчера — я сам пойму через ИИ\n"
             "• /aiadd — добавить расход через ИИ\n"
             "• /add — добавить расход вручную\n"
@@ -276,6 +334,9 @@ async def main():
             "• /remind_pay — отметить напоминание как оплачено\n"
             "• /me — твой профиль и семья\n"
             "• /family — информация о семье\n"
+            "• /family_invite — пригласить в семью\n"
+            "• /family_join КОД — присоединиться к семье\n"
+            "• /family_rename НОВОЕ_НАЗВАНИЕ — переименовать семью\n"
             "• /help — подсказка"
         )
 
@@ -286,8 +347,12 @@ async def main():
             "Доступные команды:\n"
             "/start — начать работу\n"
             "/help — помощь\n\n"
+            "/setname ИМЯ — как тебя называть\n"
             "/me — показать твой профиль и семью\n"
-            "/family — информация о семье\n\n"
+            "/family — информация о семье\n"
+            "/family_invite — пригласить в семью (даёт код)\n"
+            "/family_join КОД — присоединиться к семье по коду\n"
+            "/family_rename НАЗВАНИЕ — переименовать семью\n\n"
             "/add СУММА описание — добавить расход вручную\n"
             "  пример: /add 2435 Пятёрочка продукты\n\n"
             "/income СУММА описание — добавить доход вручную\n"
@@ -303,6 +368,42 @@ async def main():
             "/reminders — список активных напоминаний\n"
             "/remind_today — список платежей на сегодня\n"
             "/remind_pay ID — отметить напоминание как оплачено"
+        )
+
+    @dp.message(Command("setname"))
+    async def cmd_setname(message: Message):
+        """
+        Задать своё имя, которое будет видно в семье и отчётах.
+        Формат: /setname Имя
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+
+        if len(parts) < 2:
+            await message.answer(
+                "Формат команды:\n"
+                "/setname ИМЯ\n\n"
+                "Пример:\n"
+                "/setname Витя"
+            )
+            return
+
+        name = parts[1].strip()
+        telegram_id = message.from_user.id
+
+        try:
+            await api_set_name(telegram_id, name)
+        except Exception as e:
+            print(f"Ошибка /setname: {e}")
+            await message.answer(
+                "Не получилось сохранить имя 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        await message.answer(
+            f"Готово ✅\n"
+            f"Буду называть тебя: {name}"
         )
 
     # /me — кто я и какая семья
@@ -375,6 +476,143 @@ async def main():
                 lines.append(f"- {m_name} ({role})")
 
         await message.answer("\n".join(lines))
+
+    # /family_invite — получить код семьи
+    @dp.message(Command("family_invite"))
+    async def cmd_family_invite(message: Message):
+        telegram_id = message.from_user.id
+
+        try:
+            data = await api_get_household_invite(telegram_id)
+        except Exception as e:
+            print(f"Ошибка /family_invite: {e}")
+            await message.answer(
+                "Не получилось создать приглашение в семью 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        code = data.get("code")
+        await message.answer(
+            "Приглашение в семью:\n\n"
+            f"Код: {code}\n\n"
+            "Пусть второй человек отправит боту команду:\n"
+            f"/family_join {code}"
+        )
+
+    # /family_join КОД — присоединиться к семье
+    @dp.message(Command("family_join"))
+    async def cmd_family_join(message: Message):
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+
+        if len(parts) < 2:
+            await message.answer(
+                "Формат команды:\n"
+                "/family_join КОД\n\n"
+                "Код можно получить у того, кто уже в семье через /family_invite"
+            )
+            return
+
+        code = parts[1].strip()
+        telegram_id = message.from_user.id
+
+        try:
+            info = await api_join_household(telegram_id, code)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                await message.answer("Семья с таким кодом не найдена 😔")
+                return
+            if e.response.status_code == 400:
+                await message.answer("Неверный формат кода приглашения 😔")
+                return
+            print(f"HTTP ошибка /family_join: {e}")
+            await message.answer(
+                "Не получилось присоединиться к семье 😔\n"
+                "Попробуй позже."
+            )
+            return
+        except Exception as e:
+            print(f"Ошибка /family_join: {e}")
+            await message.answer(
+                "Не получилось присоединиться к семье 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        members = info.get("members") or []
+        member_lines = []
+        for m in members:
+            m_name = m.get("name") or "без имени"
+            role = m.get("role") or "member"
+            member_lines.append(f"- {m_name} ({role})")
+
+        msg_lines = [
+            "Готово! 🎉",
+            f"Ты теперь в семье: {info.get('name')}",
+        ]
+        if member_lines:
+            msg_lines.append("")
+            msg_lines.append("Сейчас в семье:")
+            msg_lines.extend(member_lines)
+
+        msg_lines.append(
+            "\nЧтобы в списке семьи было видно твоё имя, "
+            "отправь команду:\n/setname ТвоёИмя"
+        )
+
+        await message.answer("\n".join(msg_lines))
+
+
+    # /family_rename — переименовать семью
+    @dp.message(Command("family_rename"))
+    async def cmd_family_rename(message: Message):
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+
+        if len(parts) < 2:
+            await message.answer(
+                "Формат команды:\n"
+                "/family_rename НОВОЕ НАЗВАНИЕ\n\n"
+                "Пример:\n"
+                "/family_rename Наша семья"
+            )
+            return
+
+        new_name = parts[1].strip()
+        telegram_id = message.from_user.id
+
+        try:
+            info = await api_rename_household(telegram_id, new_name)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                await message.answer(
+                    "Переименовать семью может только владелец (owner) или админ 😔"
+                )
+                return
+            if e.response.status_code == 400:
+                await message.answer(
+                    "Сначала нужно создать семью (просто добавь расход или доход)."
+                )
+                return
+            print(f"HTTP ошибка /family_rename: {e}")
+            await message.answer(
+                "Не получилось переименовать семью 😔\n"
+                "Попробуй позже."
+            )
+            return
+        except Exception as e:
+            print(f"Ошибка /family_rename: {e}")
+            await message.answer(
+                "Не получилось переименовать семью 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        await message.answer(
+            f"Готово ✅\n"
+            f"Новое название семьи: {info.get('name')}"
+        )
 
     # /add — расход
     @dp.message(Command("add"))

@@ -16,7 +16,6 @@ class TransactionBase(BaseModel):
     category: Optional[str] = None
     date: Optional[datetime] = None
 
-    # НОВОЕ: тип операции
     # "expense" — расход, "income" — доход
     kind: str = "expense"
 
@@ -56,14 +55,16 @@ class ReportSummary(BaseModel):
 
 class BalanceReport(BaseModel):
     """
-    Отчёт по балансу за период:
-    доходы, расходы, итог.
+    Баланс за период:
+    - расходы
+    - доходы
+    - итог (доходы - расходы)
     """
 
     days: int
     expenses_total: float
     incomes_total: float
-    net: float  # incomes_total - expenses_total
+    net: float
     currency: str
 
 
@@ -109,7 +110,10 @@ class MemberShort(BaseModel):
 
 
 class MeResponse(BaseModel):
-    """Ответ для /me: кто я, какая семья и кто в ней."""
+    """
+    Ответ для /me:
+    кто я, какая семья и кто в ней.
+    """
     user_id: int
     telegram_id: Optional[int] = None
     name: Optional[str] = None
@@ -119,11 +123,14 @@ class MeResponse(BaseModel):
     currency: str
     privacy_mode: str
     role: str  # роль текущего пользователя в семье
+
     members: List[MemberShort]
 
 
 class HouseholdInfo(BaseModel):
-    """Информация о семье и участниках (для /household)."""
+    """
+    Информация о семье и участниках (для /household).
+    """
     id: int
     name: str
     currency: str
@@ -131,8 +138,37 @@ class HouseholdInfo(BaseModel):
     members: List[MemberShort]
 
 
+class HouseholdInvite(BaseModel):
+    """
+    Ответ для /household/invite
+    (пока просто числовой код = id семьи).
+    """
+    code: str
+
+
+class HouseholdJoinRequest(BaseModel):
+    """
+    Тело запроса для /household/join.
+    """
+    code: str
+
+
+class HouseholdRenameRequest(BaseModel):
+    """
+    Тело запроса для /household/rename.
+    """
+    name: str
+
+
+class UserSetNameRequest(BaseModel):
+    """
+    Тело запроса для /user/set-name.
+    """
+    name: str
+
+
 # -----------------------
-# ВСПОМОГАТЕЛЬНОЕ
+# ПРОЧЕЕ
 # -----------------------
 
 

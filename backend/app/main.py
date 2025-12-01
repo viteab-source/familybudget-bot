@@ -22,8 +22,8 @@ app = FastAPI(title="FamilyBudget API")
 
 def get_or_create_default_household(db: Session) -> models.Household:
     """
-    Берём первую (и пока единственную) семью.
-    Если её нет — создаём.
+    Берём первую семью в базе, если её нет — создаём.
+    Нужна для Swagger / ручных запросов без telegram_id.
     """
     household = db.query(models.Household).first()
     if household is None:
@@ -48,7 +48,7 @@ def get_or_create_user_and_household(
     Если telegram_id не передан (None) — используем глобальную Default family
     и user=None. Это нужно, чтобы всё работало через Swagger / ручные запросы.
     """
-    # 1. Если не знаем telegram_id — работаем по старинке
+    # 1. Если не знаем telegram_id — работаем по-старому
     if telegram_id is None:
         household = get_or_create_default_household(db)
         return None, household
@@ -64,7 +64,7 @@ def get_or_create_user_and_household(
     if user is None:
         user = models.User(
             telegram_id=telegram_id,
-            name=None,  # потом можно сделать команду /setname
+            name=None,
         )
         db.add(user)
         db.commit()
@@ -240,12 +240,11 @@ def get_household(
     db: Session = Depends(get_db),
 ):
     """
-    Информация только о семье (без деталей по самому пользователю).
+    Информация о семье и участниках.
+    Если telegram_id не передан — берём первую семью (для Swagger).
     """
 
     if telegram_id is None:
-        # Для Swagger можно оставить без telegram_id, но из бота он всегда есть.
-        # В таком случае просто берём первую семью.
         household = db.query(models.Household).first()
         if household is None:
             raise HTTPException(status_code=404, detail="Household not found")
@@ -323,6 +322,228 @@ def get_household(
     )
 
 
+@app.get("/household/invite", response_model=schemas.HouseholdInvite)
+def get_household_invite(
+    telegram_id: int | None = Query(
+        default=None,
+        description="Telegram ID пользователя (для вызовов из бота)",
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Получить «код приглашения» для семьи текущего пользователя.
+    Пока код = id семьи (простая версия).
+    """
+    user, household = get_or_create_user_and_household(db, telegram_id)
+    return schemas.HouseholdInvite(code=str(household.id))
+
+
+@app.post("/household/join", response_model=schemas.HouseholdInfo)
+def join_household(
+    body: schemas.HouseholdJoinRequest,
+    telegram_id: int | None = Query(
+        default=None,
+        description="Telegram ID пользователя (для вызовов из бота)",
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Присоединиться к семье по коду.
+    Код сейчас = id семьи, который даёт /household/invite.
+    """
+
+    if telegram_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="telegram_id is required for /household/join",
+        )
+
+    try:
+        household_id = int(body.code)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid invite code")
+
+    household = (
+        db.query(models.Household)
+        .filter(models.Household.id == household_id)
+        .first()
+    )
+    if household is None:
+        raise HTTPException(status_code=404, detail="Household not found")
+
+    # Находим/создаём пользователя
+    user = (
+        db.query(models.User)
+        .filter(models.User.telegram_id == telegram_id)
+        .first()
+    )
+    if user is None:
+        user = models.User(telegram_id=telegram_id)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    # Проверяем, нет ли уже связи
+    membership = (
+        db.query(models.HouseholdMember)
+        .filter(
+            models.HouseholdMember.user_id == user.id,
+            models.HouseholdMember.household_id == household.id,
+        )
+        .first()
+    )
+
+    if membership is None:
+        membership = models.HouseholdMember(
+            user_id=user.id,
+            household_id=household.id,
+            role="member",
+        )
+        db.add(membership)
+        db.commit()
+
+    # Собираем участников
+    member_rows = (
+        db.query(models.HouseholdMember)
+        .join(models.User, models.HouseholdMember.user_id == models.User.id)
+        .filter(models.HouseholdMember.household_id == household.id)
+        .all()
+    )
+
+    members = [
+        schemas.MemberShort(
+            id=m.user.id,
+            name=m.user.name,
+            telegram_id=m.user.telegram_id,
+            role=m.role,
+        )
+        for m in member_rows
+    ]
+
+    return schemas.HouseholdInfo(
+        id=household.id,
+        name=household.name,
+        currency=household.currency,
+        privacy_mode=household.privacy_mode,
+        members=members,
+    )
+
+
+@app.post("/household/rename", response_model=schemas.HouseholdInfo)
+def rename_household(
+    body: schemas.HouseholdRenameRequest,
+    telegram_id: int | None = Query(
+        default=None,
+        description="Telegram ID пользователя (для вызовов из бота)",
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Переименовать семью. Можно только owner/admin.
+    """
+
+    if telegram_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="telegram_id is required for /household/rename",
+        )
+
+    user = (
+        db.query(models.User)
+        .filter(models.User.telegram_id == telegram_id)
+        .first()
+    )
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    membership = (
+        db.query(models.HouseholdMember)
+        .filter(models.HouseholdMember.user_id == user.id)
+        .first()
+    )
+    if membership is None:
+        raise HTTPException(status_code=400, detail="User has no household")
+
+    if membership.role not in ("owner", "admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only owner/admin can rename household",
+        )
+
+    household = (
+        db.query(models.Household)
+        .filter(models.Household.id == membership.household_id)
+        .first()
+    )
+    if household is None:
+        raise HTTPException(status_code=404, detail="Household not found")
+
+    household.name = body.name
+    db.commit()
+    db.refresh(household)
+
+    member_rows = (
+        db.query(models.HouseholdMember)
+        .join(models.User, models.HouseholdMember.user_id == models.User.id)
+        .filter(models.HouseholdMember.household_id == household.id)
+        .all()
+    )
+
+    members = [
+        schemas.MemberShort(
+            id=m.user.id,
+            name=m.user.name,
+            telegram_id=m.user.telegram_id,
+            role=m.role,
+        )
+        for m in member_rows
+    ]
+
+    return schemas.HouseholdInfo(
+        id=household.id,
+        name=household.name,
+        currency=household.currency,
+        privacy_mode=household.privacy_mode,
+        members=members,
+    )
+
+
+@app.post("/user/set-name")
+def set_user_name(
+    body: schemas.UserSetNameRequest,
+    telegram_id: int | None = Query(
+        default=None,
+        description="Telegram ID пользователя (для вызовов из бота)",
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Обновить имя пользователя (display name), которое будет видно в семье и отчётах.
+    """
+    if telegram_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="telegram_id is required for /user/set-name",
+        )
+
+    user, household = get_or_create_user_and_household(db, telegram_id)
+    if user is None:
+        raise HTTPException(
+            status_code=500,
+            detail="User not found for given telegram_id",
+        )
+
+    user.name = body.name
+    try:
+        db.commit()
+        db.refresh(user)
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+
+    return {"status": "ok"}
+
+
 # -----------------------
 # ТРАНЗАКЦИИ
 # -----------------------
@@ -381,10 +602,8 @@ def list_transactions(
     Список транзакций.
     Можно фильтровать по дате и по типу операции (расход/доход).
     """
-    # Определяем семью по telegram_id
     user, household = get_or_create_user_and_household(db, telegram_id)
 
-    # Берём только транзакции этой семьи
     query = db.query(models.Transaction).filter(
         models.Transaction.household_id == household.id
     )
@@ -421,7 +640,6 @@ def report_summary(
 
     user, household = get_or_create_user_and_household(db, telegram_id)
 
-    # Берём только расходы этой семьи
     txs = (
         db.query(models.Transaction)
         .filter(
@@ -434,7 +652,6 @@ def report_summary(
 
     total_amount = float(sum(t.amount for t in txs)) if txs else 0.0
 
-    # Суммируем по категориям только внутри этой семьи
     rows = (
         db.query(
             models.Transaction.category,
@@ -628,7 +845,7 @@ def parse_and_create_transaction(
         currency=currency,
         description=description,
         category=category,
-        kind="expense",  # из текста считаем, что это расход
+        kind="expense",
         date=date,
     )
 
@@ -656,14 +873,11 @@ def create_reminder(
 ):
     """
     Создать напоминание.
-    (Пока привязка к конкретному пользователю по telegram_id не используется,
-    но параметр оставляем для бота.)
     """
     user, household = get_or_create_user_and_household(db, telegram_id)
 
     next_run_at = rem.next_run_at
     if next_run_at is None and rem.interval_days:
-        # если не указана конкретная дата — берём сегодня
         next_run_at = datetime.utcnow()
 
     db_rem = models.Reminder(
@@ -696,7 +910,6 @@ def list_reminders(
 ):
     """
     Список напоминаний (по умолчанию только активные).
-    Параметр telegram_id оставляем для совместимости с ботом.
     """
     user, household = get_or_create_user_and_household(db, telegram_id)
 
