@@ -1369,35 +1369,51 @@ def parse_and_create_transaction(
     Парсит текст через YandexGPT, создаёт транзакцию и возвращает её.
     По умолчанию — РАСХОД (kind='expense').
     """
-    # 1. Просим ИИ распарсить текст
+    # 1. Парсим текст через ИИ
     try:
         parsed = parse_text_to_transaction(body.text)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"AI parse error: {e}")
 
-    # 2. Забираем сумму и валюем, что она > 0
-    try:
-        amount = float(parsed["amount"])
-    except Exception:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Некорректная сумма в ответе ИИ: {parsed!r}",
-        )
+    # 2. Сумма: сначала пробуем взять из ИИ, если он облажался — ищем число в исходном тексте
+    raw_amount = parsed.get("amount") if isinstance(parsed, dict) else None
+    amount: float | None = None
 
-    # ВАЖНО: не позволяем создавать транзакции с нулевой/отрицательной суммой
-    if amount <= 0:
+    # 2.1. Пытаемся распарсить то, что вернул ИИ
+    if raw_amount is not None:
+        try:
+            amount = float(raw_amount)
+        except Exception:
+            amount = None
+
+    # 2.2. Если ИИ не дал нормальную сумму (None или <= 0) — пробуем достать число из исходного текста
+    if amount is None or amount <= 0:
+        import re as _re
+
+        match = _re.search(r"(\d+[.,]?\d*)", body.text)
+        if match:
+            num_str = match.group(1).replace(",", ".")
+            try:
+                amount = float(num_str)
+            except Exception:
+                amount = None
+
+    # 2.3. Финальная проверка
+    if amount is None or amount <= 0:
         raise HTTPException(
             status_code=400,
             detail=(
                 "Некорректная сумма: сумма должна быть больше нуля. "
-                "Скорее всего, в тексте не было числа."
+                "Скорее всего, в тексте не было числа или его не получилось разобрать."
             ),
         )
 
-    # 3. Остальные поля
+    # 3. Остальные поля из ИИ
     currency = parsed.get("currency") or "RUB"
     description = parsed.get("description") or body.text
-    category = parsed.get("category")
+
+    raw_category = parsed.get("category")
+    category_name = (raw_category or "").strip() or None
 
     date_str = parsed.get("date")
     if date_str:
@@ -1408,15 +1424,40 @@ def parse_and_create_transaction(
     else:
         date = datetime.utcnow()
 
+    # 4. Находим/создаём пользователя и семью
     user, household = get_or_create_user_and_household(db, telegram_id)
 
+    # 5. Привязываем категорию к таблице categories (если есть имя)
+    category_obj = None
+    if category_name:
+        category_obj = (
+            db.query(models.Category)
+            .filter(
+                models.Category.household_id == household.id,
+                func.lower(models.Category.name) == func.lower(category_name),
+            )
+            .first()
+        )
+        if category_obj is None:
+            # создаём новую категорию в этой семье
+            category_obj = models.Category(
+                household_id=household.id,
+                name=category_name,
+            )
+            db.add(category_obj)
+            db.flush()  # чтобы появился id
+
+    # 6. Создаём транзакцию
     db_tx = models.Transaction(
         household_id=household.id,
         user_id=user.id if user else None,
         amount=amount,
         currency=currency,
         description=description,
-        category=category,
+        # строковое имя категории — либо из объекта, либо как есть
+        category=category_obj.name if category_obj else category_name,
+        # ссылка на категорию (если нашли/создали)
+        category_id=category_obj.id if category_obj else None,
         kind="expense",
         date=date,
     )
