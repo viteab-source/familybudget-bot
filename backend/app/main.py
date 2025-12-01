@@ -1,8 +1,12 @@
 from datetime import datetime, timedelta
 import csv
 from io import StringIO
+from typing import List
+import secrets
+import string
 
 from fastapi import FastAPI, Depends, HTTPException, Query
+
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -18,7 +22,6 @@ app = FastAPI(title="FamilyBudget API")
 # -----------------------
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # -----------------------
-
 
 def get_or_create_default_household(db: Session) -> models.Household:
     """
@@ -99,6 +102,41 @@ def get_or_create_user_and_household(
         db.commit()
 
     return user, household
+
+INVITE_CODE_LENGTH = 8
+
+
+def generate_invite_code(db: Session, length: int = INVITE_CODE_LENGTH) -> str:
+    """
+    Генерирует уникальный короткий код приглашения из заглавных букв и цифр.
+
+    Примеры кодов: AB7K3F, X9L2MD и т.п.
+    """
+    # Базовый алфавит: A-Z + 0-9
+    alphabet = string.ascii_uppercase + string.digits
+
+    # Убираем похожие символы, чтобы код было легче читать/вводить
+    ambiguous = "O0I1"
+    alphabet = "".join(ch for ch in alphabet if ch not in ambiguous)
+
+    # До 20 попыток найти свободный код
+    for _ in range(20):
+        code = "".join(secrets.choice(alphabet) for _ in range(length))
+
+        exists = (
+            db.query(models.HouseholdInvite)
+            .filter(models.HouseholdInvite.code == code)
+            .first()
+        )
+        if not exists:
+            return code
+
+    # Если совсем не повезло — кидаем 500-ю ошибку
+    raise HTTPException(
+        status_code=500,
+        detail="Не удалось сгенерировать код приглашения, попробуй ещё раз",
+    )
+
 
 
 # -----------------------
@@ -321,7 +359,6 @@ def get_household(
         members=members,
     )
 
-
 @app.get("/household/invite", response_model=schemas.HouseholdInvite)
 def get_household_invite(
     telegram_id: int | None = Query(
@@ -331,12 +368,30 @@ def get_household_invite(
     db: Session = Depends(get_db),
 ):
     """
-    Получить «код приглашения» для семьи текущего пользователя.
-    Пока код = id семьи (простая версия).
+    Получить код приглашения в семью текущего пользователя.
+
+    Теперь:
+    - код = случайная строка (6–8 символов),
+    - хранится в таблице household_invites.
     """
     user, household = get_or_create_user_and_household(db, telegram_id)
-    return schemas.HouseholdInvite(code=str(household.id))
 
+    # генерируем уникальный код
+    code = generate_invite_code(db)
+
+    invite = models.HouseholdInvite(
+        household_id=household.id,
+        code=code,
+        created_by_user_id=user.id if user else None,
+        # можно регулировать срок действия; пока на 30 дней
+        expires_at=datetime.utcnow() + timedelta(days=30),
+    )
+
+    db.add(invite)
+    db.commit()
+    db.refresh(invite)
+
+    return schemas.HouseholdInvite(code=invite.code)
 
 @app.post("/household/join", response_model=schemas.HouseholdInfo)
 def join_household(
@@ -348,8 +403,13 @@ def join_household(
     db: Session = Depends(get_db),
 ):
     """
-    Присоединиться к семье по коду.
-    Код сейчас = id семьи, который даёт /household/invite.
+    Присоединиться к семье по коду приглашения.
+
+    Основной вариант:
+    - код = строка из household_invites.code.
+
+    Legacy-вариант (для старых инвайтов):
+    - если код — число, пробуем трактовать как id семьи.
     """
 
     if telegram_id is None:
@@ -358,20 +418,42 @@ def join_household(
             detail="telegram_id is required for /household/join",
         )
 
-    try:
-        household_id = int(body.code)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid invite code")
+    raw_code = (body.code or "").strip()
+    if not raw_code:
+        raise HTTPException(status_code=400, detail="Invite code is empty")
 
-    household = (
-        db.query(models.Household)
-        .filter(models.Household.id == household_id)
+    normalized_code = raw_code.upper()
+
+    household: models.Household | None = None
+
+    # 1. Пытаемся найти инвайт по новому формату (рандомный код)
+    invite = (
+        db.query(models.HouseholdInvite)
+        .filter(models.HouseholdInvite.code == normalized_code)
         .first()
     )
-    if household is None:
-        raise HTTPException(status_code=404, detail="Household not found")
 
-    # Находим/создаём пользователя
+    if invite is not None:
+        # Проверяем срок действия (если задан)
+        if invite.expires_at and invite.expires_at < datetime.utcnow():
+            raise HTTPException(status_code=404, detail="Invite code expired")
+        household = invite.household
+    else:
+        # 2. Legacy: если код — число, трактуем как id семьи
+        try:
+            household_id = int(raw_code)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Invite code not found")
+
+        household = (
+            db.query(models.Household)
+            .filter(models.Household.id == household_id)
+            .first()
+        )
+        if household is None:
+            raise HTTPException(status_code=404, detail="Household not found")
+
+    # Находим/создаём пользователя по telegram_id
     user = (
         db.query(models.User)
         .filter(models.User.telegram_id == telegram_id)
@@ -383,7 +465,7 @@ def join_household(
         db.commit()
         db.refresh(user)
 
-    # Проверяем, нет ли уже связи
+    # Проверяем, нет ли уже такого участника в этой семье
     membership = (
         db.query(models.HouseholdMember)
         .filter(
@@ -402,7 +484,7 @@ def join_household(
         db.add(membership)
         db.commit()
 
-    # Собираем участников
+    # Собираем список участников семьи
     member_rows = (
         db.query(models.HouseholdMember)
         .join(models.User, models.HouseholdMember.user_id == models.User.id)
@@ -427,7 +509,6 @@ def join_household(
         privacy_mode=household.privacy_mode,
         members=members,
     )
-
 
 @app.post("/household/rename", response_model=schemas.HouseholdInfo)
 def rename_household(
@@ -543,6 +624,88 @@ def set_user_name(
 
     return {"status": "ok"}
 
+@app.post("/household/leave")
+def leave_household(
+    telegram_id: int | None = Query(
+        default=None,
+        description="Telegram ID пользователя (для вызовов из бота)",
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Выйти из текущей семьи.
+
+    Правила:
+    - Если пользователь не состоит в семье → 400.
+    - Если пользователь owner и в семье есть другие участники → 400
+      (нужно сначала передать роль или удалить участников).
+    - Если пользователь owner и он один в семье → удаляем и его membership,
+      и саму семью.
+    - Если обычный участник → просто удаляем его membership.
+    """
+    if telegram_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="telegram_id is required for /household/leave",
+        )
+
+    # Находим пользователя
+    user = (
+        db.query(models.User)
+        .filter(models.User.telegram_id == telegram_id)
+        .first()
+    )
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Находим его membership
+    membership = (
+        db.query(models.HouseholdMember)
+        .filter(models.HouseholdMember.user_id == user.id)
+        .first()
+    )
+    if membership is None:
+        raise HTTPException(
+            status_code=400,
+            detail="User has no household to leave",
+        )
+
+    household = (
+        db.query(models.Household)
+        .filter(models.Household.id == membership.household_id)
+        .first()
+    )
+    if household is None:
+        raise HTTPException(status_code=404, detail="Household not found")
+
+    # Считаем количество участников семьи
+    members_count = (
+        db.query(models.HouseholdMember)
+        .filter(models.HouseholdMember.household_id == household.id)
+        .count()
+    )
+
+    # Если он owner и есть ещё участники — запрещаем выход
+    if membership.role == "owner" and members_count > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Owner не может выйти из семьи, пока есть другие участники. "
+                "Сначала передай права или удали участников."
+            ),
+        )
+
+    # Если он owner и он один — удаляем семью целиком
+    if membership.role == "owner" and members_count == 1:
+        db.delete(membership)
+        db.delete(household)
+        db.commit()
+        return {"status": "ok", "message": "Семья удалена, ты вышел из семьи"}
+
+    # Обычный участник — просто удаляем membership
+    db.delete(membership)
+    db.commit()
+    return {"status": "ok", "message": "Ты вышел из семьи"}
 
 # -----------------------
 # ТРАНЗАКЦИИ
@@ -727,6 +890,66 @@ def report_balance(
         currency=currency,
     )
 
+@app.get("/report/members", response_model=schemas.MembersReport)
+def report_members(
+    days: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
+):
+    """
+    Отчёт по людям: кто сколько потратил (расходы) за N дней.
+    """
+    since = datetime.utcnow() - timedelta(days=days)
+
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    # Сумма расходов по каждому пользователю семьи
+    rows = (
+        db.query(
+            models.User.id.label("user_id"),
+            models.User.name,
+            models.User.telegram_id,
+            func.sum(models.Transaction.amount).label("total"),
+        )
+        .join(models.Transaction, models.Transaction.user_id == models.User.id)
+        .filter(
+            models.Transaction.household_id == household.id,
+            models.Transaction.date >= since,
+            models.Transaction.kind == "expense",
+        )
+        .group_by(models.User.id, models.User.name, models.User.telegram_id)
+        .order_by(func.sum(models.Transaction.amount).desc())
+        .all()
+    )
+
+    # Определяем валюту: из любой подходящей транзакции, либо из семьи
+    tx_any = (
+        db.query(models.Transaction)
+        .filter(
+            models.Transaction.household_id == household.id,
+            models.Transaction.date >= since,
+            models.Transaction.kind == "expense",
+        )
+        .first()
+    )
+    currency = tx_any.currency if tx_any else household.currency
+
+    members = [
+        schemas.MemberExpenseSummary(
+            user_id=row.user_id,
+            name=row.name,
+            telegram_id=row.telegram_id,
+            amount=float(row.total),
+        )
+        for row in rows
+    ]
+
+    return schemas.MembersReport(
+        days=days,
+        currency=currency,
+        members=members,
+    )
+
 
 @app.get("/transactions/export/csv")
 def export_transactions_csv(
@@ -796,6 +1019,248 @@ def export_transactions_csv(
         headers=headers,
     )
 
+# -----------------------
+# КАТЕГОРИИ 2.0
+# -----------------------
+
+@app.get("/categories", response_model=List[schemas.CategoryRead])
+def list_categories(
+    db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
+):
+    """
+    Список категорий для текущей семьи.
+
+    Дополнительно:
+    - берём все уникальные category из транзакций этой семьи;
+    - для тех, которых ещё нет в таблице categories, создаём записи;
+    - затем возвращаем полный список категорий.
+    """
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    # 1) Уже существующие категории в таблице categories
+    existing_q = db.query(models.Category.name).filter(
+        models.Category.household_id == household.id
+    )
+    existing_names = {
+        (name or "").strip().lower()
+        for (name,) in existing_q.all()
+        if name
+    }
+
+    # 2) Уникальные названия категорий из транзакций
+    tx_categories = (
+        db.query(models.Transaction.category)
+        .filter(
+            models.Transaction.household_id == household.id,
+            models.Transaction.category.isnot(None),
+            models.Transaction.category != "",
+        )
+        .distinct()
+        .all()
+    )
+
+    created = False
+    for (cat_name,) in tx_categories:
+        if not cat_name:
+            continue
+        normalized = cat_name.strip().lower()
+        if not normalized or normalized in existing_names:
+            continue
+
+        db_cat = models.Category(
+            household_id=household.id,
+            name=cat_name.strip(),
+        )
+        db.add(db_cat)
+        existing_names.add(normalized)
+        created = True
+
+    if created:
+        db.commit()
+
+    # 3) Финальный список категорий
+    categories = (
+        db.query(models.Category)
+        .filter(models.Category.household_id == household.id)
+        .order_by(
+            models.Category.sort_order.is_(None),  # None в конец
+            models.Category.sort_order,
+            models.Category.name,
+        )
+        .all()
+    )
+    return categories
+
+@app.post("/categories", response_model=schemas.CategoryRead)
+def create_category(
+    category: schemas.CategoryCreate,
+    db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
+):
+    """
+    Создать новую категорию для текущей семьи.
+    """
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    name = category.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Название категории не может быть пустым")
+
+    # Чуть защищаемся от дублей по имени внутри семьи (без учёта регистра)
+    existing = (
+        db.query(models.Category)
+        .filter(
+            models.Category.household_id == household.id,
+            func.lower(models.Category.name) == func.lower(name),
+        )
+        .first()
+    )
+    if existing:
+        return existing
+
+    # Swagger часто шлёт parent_id = 0 -> превращаем в NULL
+    parent_id = category.parent_id
+    if parent_id in (0, -1):
+        parent_id = None
+
+    db_cat = models.Category(
+        household_id=household.id,
+        name=name,
+        parent_id=parent_id,
+        sort_order=category.sort_order,
+    )
+    db.add(db_cat)
+    db.commit()
+    db.refresh(db_cat)
+    return db_cat
+
+@app.post("/categories/rename", response_model=schemas.CategoryRead)
+def rename_category(
+    old_name: str = Query(..., description="Старое название категории"),
+    new_name: str = Query(..., description="Новое название категории"),
+    db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
+):
+    """
+    Переименовать категорию внутри текущей семьи.
+
+    old_name / new_name — обычные строки.
+    Поиск по имени — без учёта регистра.
+    """
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    old_name_clean = old_name.strip()
+    new_name_clean = new_name.strip()
+
+    if not old_name_clean or not new_name_clean:
+        raise HTTPException(
+            status_code=400,
+            detail="Старое и новое название категории не могут быть пустыми",
+        )
+
+    # Ищем категорию по старому имени
+    cat = (
+        db.query(models.Category)
+        .filter(
+            models.Category.household_id == household.id,
+            func.lower(models.Category.name) == func.lower(old_name_clean),
+        )
+        .first()
+    )
+    if not cat:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Категория «{old_name_clean}» не найдена",
+        )
+
+    # Проверяем, нет ли категории с таким новым именем
+    duplicate = (
+        db.query(models.Category)
+        .filter(
+            models.Category.household_id == household.id,
+            func.lower(models.Category.name) == func.lower(new_name_clean),
+            models.Category.id != cat.id,
+        )
+        .first()
+    )
+    if duplicate:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Категория «{new_name_clean}» уже существует",
+        )
+
+    # Обновляем имя категории
+    cat.name = new_name_clean
+
+    # Обновляем строковое поле category у всех транзакций,
+    # которые привязаны к этой категории
+    db.query(models.Transaction).filter(
+        models.Transaction.household_id == household.id,
+        models.Transaction.category_id == cat.id,
+    ).update({"category": new_name_clean}, synchronize_session=False)
+
+    db.commit()
+    db.refresh(cat)
+    return cat
+
+@app.post("/transactions/set-category-last", response_model=schemas.TransactionRead)
+def set_last_transaction_category(
+    category: str = Query(..., description="Новое название категории"),
+    db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
+):
+    """
+    Поменять категорию у последней транзакции текущего пользователя в этой семье.
+    Параллельно создаём (или находим) категорию в таблице categories
+    и привязываем транзакцию к ней.
+    """
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    name = (category or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Название категории не может быть пустым")
+
+    tx = (
+        db.query(models.Transaction)
+        .filter(
+            models.Transaction.household_id == household.id,
+            models.Transaction.user_id == user.id,
+        )
+        .order_by(models.Transaction.created_at.desc())
+        .first()
+    )
+
+    if not tx:
+        raise HTTPException(status_code=404, detail="У тебя ещё нет транзакций")
+
+    # Ищем существующую категорию (без учёта регистра)
+    existing = (
+        db.query(models.Category)
+        .filter(
+            models.Category.household_id == household.id,
+            func.lower(models.Category.name) == func.lower(name),
+        )
+        .first()
+    )
+
+    if existing:
+        db_cat = existing
+    else:
+        db_cat = models.Category(
+            household_id=household.id,
+            name=name,
+        )
+        db.add(db_cat)
+        db.flush()  # чтобы получить id без отдельного коммита
+
+    # Обновляем транзакцию: и строковое поле, и ссылку на категорию
+    tx.category = name
+    tx.category_id = db_cat.id
+
+    db.commit()
+    db.refresh(tx)
+    return tx
 
 @app.post(
     "/transactions/parse-and-create",
@@ -810,11 +1275,13 @@ def parse_and_create_transaction(
     Парсит текст через YandexGPT, создаёт транзакцию и возвращает её.
     По умолчанию — РАСХОД (kind='expense').
     """
+    # 1. Просим ИИ распарсить текст
     try:
         parsed = parse_text_to_transaction(body.text)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"AI parse error: {e}")
 
+    # 2. Забираем сумму и валюем, что она > 0
     try:
         amount = float(parsed["amount"])
     except Exception:
@@ -823,6 +1290,17 @@ def parse_and_create_transaction(
             detail=f"Некорректная сумма в ответе ИИ: {parsed!r}",
         )
 
+    # ВАЖНО: не позволяем создавать транзакции с нулевой/отрицательной суммой
+    if amount <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Некорректная сумма: сумма должна быть больше нуля. "
+                "Скорее всего, в тексте не было числа."
+            ),
+        )
+
+    # 3. Остальные поля
     currency = parsed.get("currency") or "RUB"
     description = parsed.get("description") or body.text
     category = parsed.get("category")
@@ -858,7 +1336,6 @@ def parse_and_create_transaction(
         raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
     return db_tx
-
 
 # -----------------------
 # НАПОМИНАНИЯ

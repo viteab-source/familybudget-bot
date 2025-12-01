@@ -211,6 +211,21 @@ async def api_set_last_transaction_category(telegram_id: int, category: str):
         resp.raise_for_status()
         return resp.json()
 
+async def api_rename_category(telegram_id: int, old_name: str, new_name: str):
+    """Переименовать категорию по имени."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{API_BASE_URL}/categories/rename",
+            params={
+                "telegram_id": telegram_id,
+                "old_name": old_name,
+                "new_name": new_name,
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
 async def api_parse_and_create(telegram_id: int, text: str):
     """Разбор свободного текста через YandexGPT + создание транзакции (расход)."""
     async with httpx.AsyncClient() as client:
@@ -506,6 +521,7 @@ async def main():
             "/export [дней] — экспорт в CSV (по умолчанию 30)\n\n"
             "/categories — список категорий\n"
             "/setcat НАЗВАНИЕ — задать категорию для последнего расхода\n\n"
+            "/cat_rename СТАРОЕ НОВОЕ — переименовать категорию\n\n"
             "Напоминания:\n"
             "/remind_add НАЗВАНИЕ СУММА ДНЕЙ\n"
             "  пример: /remind_add Коммуналка 8000 30\n"
@@ -1430,6 +1446,74 @@ async def main():
             f"Готово ✅\n"
             f"Последний расход теперь в категории «{cat}» "
             f"({amount:.2f} {currency})."
+        )
+
+    # /cat_rename СТАРОЕ НОВОЕ — переименовать категорию
+    @dp.message(Command("cat_rename"))
+    async def cmd_cat_rename(message: Message):
+        text = message.text or ""
+        parts = text.split(maxsplit=3)
+
+        # parts: ["/cat_rename", "Старое", "Новое", ...]
+        if len(parts) < 3:
+            await message.answer(
+                "Формат:\n"
+                "/cat_rename СТАРОЕ НОВОЕ\n\n"
+                "Пример:\n"
+                "/cat_rename Игрушки Детям"
+            )
+            return
+
+        old_name = parts[1].strip()
+        new_name = parts[2].strip()
+
+        if not old_name or not new_name:
+            await message.answer(
+                "Старое и новое название не могут быть пустыми.\n"
+                "Пример: /cat_rename Игрушки Детям"
+            )
+            return
+
+        telegram_id = message.from_user.id
+
+        try:
+            cat = await api_rename_category(
+                telegram_id=telegram_id,
+                old_name=old_name,
+                new_name=new_name,
+            )
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                data = e.response.json()
+                detail = data.get("detail") or ""
+            except Exception:
+                pass
+
+            if e.response.status_code == 404:
+                await message.answer(detail or "Категория не найдена.")
+                return
+            if e.response.status_code == 400:
+                await message.answer(detail or "Некорректные данные.")
+                return
+
+            print(f"HTTP ошибка /cat_rename: {detail or e}")
+            await message.answer(
+                "Не получилось переименовать категорию 😔\n"
+                "Попробуй позже."
+            )
+            return
+        except Exception as e:
+            print(f"Ошибка /cat_rename: {e}")
+            await message.answer(
+                "Не получилось переименовать категорию 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        await message.answer(
+            f"Готово ✅\n"
+            f"Категория переименована в «{cat.get('name') or new_name}»."
         )
 
     # /balance — баланс доходы/расходы
