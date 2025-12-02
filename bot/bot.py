@@ -6,7 +6,14 @@ import logging
 import httpx
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, BufferedInputFile
+from aiogram.types import (
+    Message,
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения из .env
@@ -550,6 +557,69 @@ async def send_tx_confirmation(
         lines.append(f"«{source_text}»")
 
     await message.answer("\n".join(lines))
+
+async def send_ai_category_suggestions(
+    message: Message,
+    tx: dict,
+    telegram_id: int,
+):
+    """
+    После ИИ-расхода показываем кнопки категорий,
+    чтобы можно было быстро поменять категорию последнего расхода.
+    """
+    current_category = (tx.get("category") or "").strip()
+    if not current_category:
+        return
+
+    try:
+        cats = await api_get_categories(telegram_id)
+    except Exception as e:
+        print(f"Ошибка при получении категорий для подсказок: {e}")
+        return
+
+    # Собираем список уникальных имён категорий
+    names: list[str] = []
+    for c in cats or []:
+        name = (c.get("name") or "").strip()
+        if not name:
+            continue
+        if name not in names:
+            names.append(name)
+
+    # Формируем список подсказок: сначала текущая категория, потом ещё несколько
+    suggestions: list[str] = []
+    suggestions.append(current_category)
+
+    for name in names:
+        if name == current_category:
+            continue
+        suggestions.append(name)
+        if len(suggestions) >= 4:  # максимум 4 кнопки
+            break
+
+    # Если нет альтернатив — кнопки не показываем
+    if len(suggestions) <= 1:
+        return
+
+    # Строим клавиатуру: каждая категория — отдельная кнопка в столбик
+    buttons: list[list[InlineKeyboardButton]] = []
+    for name in suggestions:
+        label = f"✅ {name}" if name == current_category else name
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"setcat_ai:{name}",
+                )
+            ]
+        )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    await message.answer(
+        "Если категория не та — выбери правильную:",
+        reply_markup=keyboard,
+    )
 
 # -----------------------
 # ОСНОВНАЯ ЛОГИКА БОТА
@@ -1611,6 +1681,7 @@ async def main():
             return
 
         await send_tx_confirmation(message, tx, raw_text, via_ai=True)
+        await send_ai_category_suggestions(message, tx, telegram_id)
 
     # /report — отчёт по расходам
     @dp.message(Command("report"))
@@ -1869,6 +1940,81 @@ async def main():
         currency = tx.get("currency", "RUB")
 
         await message.answer(
+            f"Готово ✅\n"
+            f"Последний расход теперь в категории «{cat}» "
+            f"({amount:.2f} {currency})."
+        )
+
+    # Выбор категории после ИИ через инлайн-кнопки
+    @dp.callback_query(F.data.startswith("setcat_ai:"))
+    async def cb_setcat_ai(call: CallbackQuery):
+        data = call.data or ""
+        prefix = "setcat_ai:"
+        if not data.startswith(prefix):
+            await call.answer()
+            return
+
+        category_name = data[len(prefix):].strip()
+        if not category_name:
+            await call.answer("Категория не распознана 😕", show_alert=False)
+            return
+
+        telegram_id = call.from_user.id
+
+        try:
+            tx = await api_set_last_transaction_category(
+                telegram_id=telegram_id,
+                category=category_name,
+            )
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                detail = e.response.json().get("detail", "")
+            except Exception:
+                pass
+
+            if e.response.status_code == 404:
+                await call.answer()
+                await call.message.answer(
+                    "У тебя ещё нет транзакций — нечему задавать категорию 🙂"
+                )
+                return
+            if e.response.status_code == 400:
+                await call.answer()
+                await call.message.answer(
+                    detail or "Некорректное название категории."
+                )
+                return
+
+            print(f"HTTP ошибка cb_setcat_ai: {e}")
+            await call.answer()
+            await call.message.answer(
+                "Не получилось сохранить категорию 😔\n"
+                "Попробуй позже."
+            )
+            return
+        except Exception as e:
+            print(f"Ошибка cb_setcat_ai: {e}")
+            await call.answer()
+            await call.message.answer(
+                "Не получилось сохранить категорию 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        # Успех: убираем кнопки и шлём подтверждение
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        await call.answer("Категория обновлена ✅", show_alert=False)
+
+        cat = tx.get("category") or category_name
+        amount = float(tx.get("amount", 0.0) or 0.0)
+        currency = tx.get("currency") or "RUB"
+
+        await call.message.answer(
             f"Готово ✅\n"
             f"Последний расход теперь в категории «{cat}» "
             f"({amount:.2f} {currency})."
@@ -2346,6 +2492,8 @@ async def main():
             prefix="Распознал голос и записал расход через ИИ:",
         )
 
+        await send_ai_category_suggestions(message, tx, telegram_id)
+
     # Любой текст без команды — как /aiadd (расход)
     @dp.message()
     async def handle_free_text(message: Message):
@@ -2390,6 +2538,8 @@ async def main():
             return
 
         await send_tx_confirmation(message, tx, text, via_ai=True)
+        await send_ai_category_suggestions(message, tx, telegram_id)
+
     # Запускаем бесконечный цикл обработки апдейтов от Telegram
     logger.info("Бот запущен, ждём сообщения... Нажми Ctrl+C чтобы остановить.")
 

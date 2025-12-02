@@ -821,12 +821,17 @@ def create_transaction(
             detail="kind должен быть 'expense' или 'income'",
         )
 
+    # Пытаемся сразу определить магазин из описания/категории
+    text_for_merchant = (tx.description or "") + " " + (tx.category or "")
+    merchant = extract_merchant_from_text(text_for_merchant)
+
     db_tx = models.Transaction(
         household_id=household.id,
         user_id=user.id if user else None,
         amount=tx.amount,
         currency=tx.currency or household.currency,
         description=tx.description,
+        merchant=merchant,
         category=tx.category,
         kind=kind,
         date=tx.date or datetime.utcnow(),
@@ -1065,30 +1070,30 @@ def report_shops(
     totals: dict[str, float] = {}
 
     for tx in txs:
-        # Пробуем вытащить merchant из description
-        merchant = extract_merchant_from_text(tx.description)
+        # 1. Если в транзакции уже сохранён merchant — используем его
+        merchant = getattr(tx, "merchant", None)
+
+        # 2. Если не заполнен — пробуем определить из описания/категории
         if not merchant:
-            # можно попробовать из строкового поля category (старое)
-            merchant = extract_merchant_from_text(tx.category)
+            base_text = (tx.description or "") + " " + (tx.category or "")
+            merchant = extract_merchant_from_text(base_text)
+
         if not merchant:
             continue
 
-        amount = float(tx.amount or 0)
-        totals[merchant] = totals.get(merchant, 0.0) + amount
+        totals[merchant] = totals.get(merchant, 0.0) + float(tx.amount)
 
-    # Собираем список, убираем нулевые
+    tx_any = txs[0] if txs else None
+    currency = tx_any.currency if tx_any else household.currency
+
     shops = [
-        schemas.ShopSummary(merchant=name, amount=round(total, 2))
-        for name, total in totals.items()
-        if total > 0
+        schemas.ShopSummary(merchant=name, amount=totals[name])
+        for name in sorted(totals.keys(), key=lambda k: totals[k], reverse=True)
     ]
-
-    # Сортируем по сумме
-    shops.sort(key=lambda s: s.amount, reverse=True)
 
     return schemas.ShopsReport(
         days=days,
-        currency=household.currency,
+        currency=currency,
         shops=shops,
     )
 
@@ -1770,9 +1775,13 @@ def edit_last_transaction(
         tx.amount = new_amount
     if new_description is not None and new_description.strip():
         tx.description = new_description.strip()
+        # Обновляем merchant по новому описанию
+        text_for_merchant = (tx.description or "") + " " + (tx.category or "")
+        tx.merchant = extract_merchant_from_text(text_for_merchant)
 
     db.commit()
     db.refresh(tx)
+
 
     # Обновляем информацию по бюджету (если есть такая функция)
     try:
@@ -1874,6 +1883,10 @@ def parse_and_create_transaction(
             db.add(category_obj)
             db.flush()  # чтобы появился id
 
+    # Пробуем определить магазин по описанию и исходному тексту
+    base_text = (description or "") + " " + body.text
+    merchant = extract_merchant_from_text(base_text)
+
     # 6. Создаём транзакцию
     db_tx = models.Transaction(
         household_id=household.id,
@@ -1881,6 +1894,7 @@ def parse_and_create_transaction(
         amount=amount,
         currency=currency,
         description=description,
+        merchant=merchant,
         # строковое имя категории — либо из объекта, либо как есть
         category=category_obj.name if category_obj else category_name,
         # ссылка на категорию (если нашли/создали)
@@ -2001,15 +2015,23 @@ def reminders_due_today(
     "/reminders/{reminder_id}/mark-paid",
     response_model=schemas.ReminderRead,
 )
+
+@app.post(
+    "/reminders/{reminder_id}/mark-paid",
+    response_model=schemas.ReminderRead,
+)
 def mark_reminder_paid(
     reminder_id: int,
     db: Session = Depends(get_db),
 ):
     """
     Отметить напоминание как оплачено.
-    Если интервал не задан — деактивируем напоминание.
-    Если интервал есть — сдвигаем next_run_at на interval_days вперёд.
+
+    1) Создаём транзакцию-расход по сумме напоминания.
+    2) Если интервал не задан — деактивируем напоминание.
+    3) Если интервал есть — сдвигаем next_run_at на interval_days вперёд.
     """
+    # 1. Ищем напоминание
     rem = (
         db.query(models.Reminder)
         .filter(models.Reminder.id == reminder_id)
@@ -2019,6 +2041,65 @@ def mark_reminder_paid(
     if rem is None:
         raise HTTPException(status_code=404, detail="Reminder not found")
 
+    # 2. Создаём транзакцию, если есть сумма
+    if rem.amount is not None and rem.amount > 0:
+        # Находим семью
+        household = (
+            db.query(models.Household)
+            .filter(models.Household.id == rem.household_id)
+            .first()
+        )
+        if household is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Household for reminder not found",
+            )
+
+        # Находим пользователя (может быть None)
+        user = None
+        if rem.user_id is not None:
+            user = (
+                db.query(models.User)
+                .filter(models.User.id == rem.user_id)
+                .first()
+            )
+
+        # Категория: используем название напоминания
+        category_obj = None
+        category_name = (rem.title or "").strip() or None
+        if category_name:
+            category_obj = (
+                db.query(models.Category)
+                .filter(
+                    models.Category.household_id == household.id,
+                    func.lower(models.Category.name)
+                    == func.lower(category_name),
+                )
+                .first()
+            )
+            if category_obj is None:
+                category_obj = models.Category(
+                    household_id=household.id,
+                    name=category_name,
+                )
+                db.add(category_obj)
+                db.flush()  # чтобы появился id
+
+        # Создаём транзакцию-расход
+        db_tx = models.Transaction(
+            household_id=household.id,
+            user_id=user.id if user else None,
+            amount=rem.amount,
+            currency=rem.currency or household.currency,
+            description=rem.title,
+            category=category_obj.name if category_obj else category_name,
+            category_id=category_obj.id if category_obj else None,
+            kind="expense",
+            date=datetime.utcnow(),
+        )
+        db.add(db_tx)
+
+    # 3. Обновляем само напоминание (как было раньше)
     if not rem.interval_days:
         rem.is_active = False
         rem.next_run_at = None
@@ -2035,3 +2116,4 @@ def mark_reminder_paid(
         raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
     return rem
+

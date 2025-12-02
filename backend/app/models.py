@@ -136,6 +136,8 @@ class Transaction(Base):
     amount = Column(Numeric(12, 2), nullable=False)
     currency = Column(String(10), nullable=False, default="RUB")
     description = Column(String, nullable=True)
+    # Название магазина / сервиса (опционально)
+    merchant = Column(String(100), nullable=True)
 
     # Старое строковое поле категории — пока оставляем,
     # чтобы ничего не сломать в отчётах и боте.
