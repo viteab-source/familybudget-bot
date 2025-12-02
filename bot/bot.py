@@ -37,6 +37,20 @@ async def _clear_family_leave_confirmation(user_id: int, delay_seconds: int = 60
     await asyncio.sleep(delay_seconds)
     pending_family_leave_confirmations.discard(user_id)
 
+def format_amount(amount, currency: str) -> str:
+    """
+    Красиво форматируем сумму:
+    123456.78 -> '123 457 RUB'
+    """
+    try:
+        value = float(amount or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+
+    # :,.0f — разделитель тысяч, без копеек
+    text = f"{value:,.0f}".replace(",", " ")
+    return f"{text} {currency}"
+
 # -----------------------
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ API
 # -----------------------
@@ -159,26 +173,42 @@ async def api_set_name(telegram_id: int, name: str):
         resp.raise_for_status()
         return resp.json()
 
-async def api_get_summary_report(telegram_id: int, days: int = 14):
+async def api_get_summary_report(
+    telegram_id: int,
+    days: int = 14,
+    user_id: int | None = None,
+):
+    params = {"days": days, "telegram_id": telegram_id}
+    if user_id is not None:
+        params["user_id"] = user_id
+
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{API_BASE_URL}/report/summary",
-            params={"days": days, "telegram_id": telegram_id},
+            params=params,
             timeout=10.0,
         )
         resp.raise_for_status()
         return resp.json()
 
+async def api_get_balance_report(
+    telegram_id: int,
+    days: int = 30,
+    user_id: int | None = None,
+):
+    params = {"days": days, "telegram_id": telegram_id}
+    if user_id is not None:
+        params["user_id"] = user_id
 
-async def api_get_balance_report(telegram_id: int, days: int = 30):
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{API_BASE_URL}/report/balance",
-            params={"days": days, "telegram_id": telegram_id},
+            params=params,
             timeout=10.0,
         )
         resp.raise_for_status()
         return resp.json()
+
 
 async def api_get_members_report(telegram_id: int, days: int = 30):
     """Отчёт по людям (расходы по каждому участнику семьи)."""
@@ -1748,6 +1778,91 @@ async def main():
 
         await message.answer("\n".join(lines))
 
+    @dp.message(Command("report_me"))
+    async def cmd_report_me(message: Message):
+        """
+        Отчёт только по твоим расходам за период.
+        /report_me          -> 14 дней по умолчанию
+        /report_me 30       -> 30 дней
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+
+        days = 14
+        if len(parts) == 2:
+            try:
+                days = int(parts[1])
+            except ValueError:
+                await message.answer("Не понял количество дней. Пример: /report_me 14")
+                return
+
+        telegram_id = message.from_user.id
+
+        # Сначала узнаём свой user_id через /me
+        try:
+            me = await api_get_me(telegram_id)
+        except Exception as e:
+            print(f"Ошибка api_get_me в /report_me: {e}")
+            await message.answer(
+                "Не получилось получить данные профиля 😔\n"
+                "Попробуй команду /me, а потом ещё раз /report_me."
+            )
+            return
+
+        user_id = me.get("user_id")
+        if not user_id:
+            await message.answer(
+                "Не удалось определить твой профиль в семье. Попробуй /me."
+            )
+            return
+
+        # Теперь запрашиваем отчёт только по этому user_id
+        try:
+            report = await api_get_summary_report(
+                telegram_id=telegram_id,
+                days=days,
+                user_id=user_id,
+            )
+        except httpx.HTTPStatusError as e:
+            print(f"HTTP ошибка /report_me: {e}")
+            await message.answer(
+                "Не удалось получить отчёт 😔\n"
+                "Попробуй позже."
+            )
+            return
+        except Exception as e:
+            print(f"Ошибка /report_me: {e}")
+            await message.answer(
+                "Не удалось получить отчёт 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        total = report.get("total_amount", 0)
+        currency = report.get("currency", "RUB")
+        by_cat = report.get("by_category", [])
+
+        if not by_cat and total == 0:
+            await message.answer(
+                "У тебя пока нет расходов за этот период 🙂\n"
+                "Добавь расход через /add или /aiadd"
+            )
+            return
+
+        lines = [
+            f"Твои расходы за последние {days} дней:",
+            f"Всего расходов: {format_amount(total, currency)}",
+            "",
+            "По категориям:",
+        ]
+
+        for item in by_cat:
+            cat = item.get("category") or "Без категории"
+            amt = item.get("amount", 0)
+            lines.append(f"- {cat}: {format_amount(amt, currency)}")
+
+        await message.answer("\n".join(lines))
+
     # /report_shops [дни] — отчёт по магазинам
     @dp.message(Command("report_shops"))
     async def cmd_report_shops(message: Message):
@@ -2327,6 +2442,89 @@ async def main():
             f"Итог: {sign} {format_amount(net, currency)}",
         ]
 
+
+        await message.answer("\n".join(lines))
+
+    @dp.message(Command("balance_me"))
+    async def cmd_balance_me(message: Message):
+        """
+        Баланс только по твоим операциям (доходы/расходы/итог).
+        /balance_me        -> 30 дней по умолчанию
+        /balance_me 7      -> 7 дней
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+
+        days = 30
+        if len(parts) == 2:
+            try:
+                days = int(parts[1])
+            except ValueError:
+                await message.answer("Не понял количество дней. Пример: /balance_me 7")
+                return
+
+        telegram_id = message.from_user.id
+
+        # Узнаём свой user_id
+        try:
+            me = await api_get_me(telegram_id)
+        except Exception as e:
+            print(f"Ошибка api_get_me в /balance_me: {e}")
+            await message.answer(
+                "Не получилось получить данные профиля 😔\n"
+                "Попробуй команду /me, а потом ещё раз /balance_me."
+            )
+            return
+
+        user_id = me.get("user_id")
+        if not user_id:
+            await message.answer(
+                "Не удалось определить твой профиль в семье. Попробуй /me."
+            )
+            return
+
+        # Запрашиваем баланс только по этому пользователю
+        try:
+            report = await api_get_balance_report(
+                telegram_id=telegram_id,
+                days=days,
+                user_id=user_id,
+            )
+        except httpx.HTTPStatusError as e:
+            print(f"HTTP ошибка /balance_me: {e}")
+            await message.answer(
+                "Не удалось получить баланс 😔\n"
+                "Попробуй позже."
+            )
+            return
+        except Exception as e:
+            print(f"Ошибка /balance_me: {e}")
+            await message.answer(
+                "Не удалось получить баланс 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        expenses = report.get("expenses_total", 0.0)
+        incomes = report.get("incomes_total", 0.0)
+        net = report.get("net", 0.0)
+        currency = report.get("currency", "RUB")
+
+        if expenses == 0 and incomes == 0:
+            await message.answer(
+                "По твоим операциям пока нет данных за этот период 🙂"
+            )
+            return
+
+        sign = "➕" if net >= 0 else "➖"
+
+        lines = [
+            f"Твой баланс за последние {days} дней:",
+            f"Доходы: {format_amount(incomes, currency)}",
+            f"Расходы: {format_amount(expenses, currency)}",
+            "",
+            f"Итог: {sign} {format_amount(net, currency)}",
+        ]
 
         await message.answer("\n".join(lines))
 

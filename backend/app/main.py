@@ -883,13 +883,14 @@ def list_transactions(
     transactions = query.order_by(models.Transaction.date.desc()).all()
     return transactions
 
-
 @app.get("/report/summary", response_model=schemas.ReportSummary)
 def report_summary(
     days: int = Query(14, ge=1, le=365),
     db: Session = Depends(get_db),
     telegram_id: int | None = Query(default=None),
+    user_id: int | None = Query(default=None),
 ):
+
     """
     Краткий отчёт: СУММА РАСХОДОВ и разрез по категориям за N дней.
     (Доходы сюда не включаем, это отдельный отчёт баланса.)
@@ -898,19 +899,22 @@ def report_summary(
 
     user, household = get_or_create_user_and_household(db, telegram_id)
 
-    txs = (
+    tx_query = (
         db.query(models.Transaction)
         .filter(
             models.Transaction.household_id == household.id,
             models.Transaction.date >= since,
             models.Transaction.kind == "expense",
         )
-        .all()
     )
+    if user_id is not None:
+        tx_query = tx_query.filter(models.Transaction.user_id == user_id)
+
+    txs = tx_query.all()
 
     total_amount = float(sum(t.amount for t in txs)) if txs else 0.0
 
-    rows = (
+    rows_query = (
         db.query(
             models.Transaction.category,
             func.sum(models.Transaction.amount).label("total"),
@@ -920,6 +924,12 @@ def report_summary(
             models.Transaction.date >= since,
             models.Transaction.kind == "expense",
         )
+    )
+    if user_id is not None:
+        rows_query = rows_query.filter(models.Transaction.user_id == user_id)
+
+    rows = (
+        rows_query
         .group_by(models.Transaction.category)
         .all()
     )
@@ -948,7 +958,9 @@ def report_balance(
     days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
     telegram_id: int | None = Query(default=None),
+    user_id: int | None = Query(default=None),
 ):
+
     """
     Баланс за период:
     - общие доходы
@@ -959,14 +971,17 @@ def report_balance(
 
     user, household = get_or_create_user_and_household(db, telegram_id)
 
-    txs = (
+    tx_query = (
         db.query(models.Transaction)
         .filter(
             models.Transaction.household_id == household.id,
             models.Transaction.date >= since,
         )
-        .all()
     )
+    if user_id is not None:
+        tx_query = tx_query.filter(models.Transaction.user_id == user_id)
+
+    txs = tx_query.all()
 
     expenses = float(sum(t.amount for t in txs if t.kind == "expense"))
     incomes = float(sum(t.amount for t in txs if t.kind == "income"))
