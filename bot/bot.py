@@ -621,6 +621,20 @@ async def send_ai_category_suggestions(
         reply_markup=keyboard,
     )
 
+def format_amount(amount, currency: str) -> str:
+    """
+    Красиво форматируем сумму:
+    123456.78 -> '123 457 RUB'
+    """
+    try:
+        value = float(amount or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+
+    # :,.0f — разделитель тысяч, без копеек
+    text = f"{value:,.0f}".replace(",", " ")
+    return f"{text} {currency}"
+
 # -----------------------
 # ОСНОВНАЯ ЛОГИКА БОТА
 # -----------------------
@@ -1722,7 +1736,7 @@ async def main():
 
         lines = [
             f"Отчёт по расходам за последние {days} дней:",
-            f"Всего расходов: {total:.2f} {currency}",
+            f"Всего расходов: {format_amount(total, currency)}",
             "",
             "По категориям:",
         ]
@@ -1730,7 +1744,7 @@ async def main():
         for item in by_cat:
             cat = item.get("category") or "Без категории"
             amt = item.get("amount", 0)
-            lines.append(f"- {cat}: {amt:.2f} {currency}")
+            lines.append(f"- {cat}: {format_amount(amt, currency)}")
 
         await message.answer("\n".join(lines))
 
@@ -1793,7 +1807,7 @@ async def main():
         for idx, shop in enumerate(shops, start=1):
             name = shop.get("merchant")
             amount = float(shop.get("amount", 0) or 0)
-            lines.append(f"{idx}. {name} — {amount:.0f} {currency}")
+            lines.append(f"{idx}. {name} — {format_amount(amount, currency)}")
 
         await message.answer("\n".join(lines))
 
@@ -1845,7 +1859,7 @@ async def main():
         for m in members:
             name = m.get("name") or "Без имени"
             amount = m.get("amount", 0.0)
-            lines.append(f"- {name}: {amount:.2f} {currency}")
+            lines.append(f"- {name}: {format_amount(amount, currency)}")
 
         await message.answer("\n".join(lines))
 
@@ -2307,11 +2321,12 @@ async def main():
 
         lines = [
             f"Баланс за последние {days} дней:",
-            f"Доходы: {incomes:.2f} {currency}",
-            f"Расходы: {expenses:.2f} {currency}",
+            f"Доходы: {format_amount(incomes, currency)}",
+            f"Расходы: {format_amount(expenses, currency)}",
             "",
-            f"Итог: {sign} {net:.2f} {currency}",
+            f"Итог: {sign} {format_amount(net, currency)}",
         ]
+
 
         await message.answer("\n".join(lines))
 
