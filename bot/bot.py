@@ -210,6 +210,29 @@ async def api_set_last_transaction_category(telegram_id: int, category: str):
         resp.raise_for_status()
         return resp.json()
 
+async def api_get_last_transaction(telegram_id: int):
+    """Получить последнюю транзакцию пользователя."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{API_BASE_URL}/transactions/last",
+            params={"telegram_id": telegram_id},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def api_delete_last_transaction(telegram_id: int):
+    """Удалить последнюю транзакцию пользователя и вернуть её данные."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{API_BASE_URL}/transactions/delete-last",
+            params={"telegram_id": telegram_id},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
 async def api_rename_category(telegram_id: int, old_name: str, new_name: str):
     """Переименовать категорию по имени."""
     async with httpx.AsyncClient() as client:
@@ -1081,6 +1104,89 @@ async def main():
             description,
             via_ai=False,
             prefix="Записал доход:",
+        )
+
+    # /last — показать последнюю операцию
+    @dp.message(Command("last"))
+    async def cmd_last(message: Message):
+        telegram_id = message.from_user.id
+
+        try:
+            tx = await api_get_last_transaction(telegram_id)
+        except httpx.HTTPStatusError as e:
+            # Пытаемся красиво обработать 404
+            if e.response.status_code == 404:
+                try:
+                    detail = e.response.json().get("detail", "")
+                except Exception:
+                    detail = ""
+                await message.answer(detail or "У тебя ещё нет транзакций 🙂")
+                return
+
+            print(f"HTTP ошибка /last: {e}")
+            await message.answer(
+                "Не получилось получить последнюю операцию 😔\n"
+                "Попробуй позже."
+            )
+            return
+        except Exception as e:
+            print(f"Ошибка /last: {e}")
+            await message.answer(
+                "Не получилось получить последнюю операцию 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        # Показываем красивое подтверждение
+        await send_tx_confirmation(
+            message,
+            tx,
+            source_text="",
+            via_ai=False,
+            prefix="Последняя операция:",
+        )
+
+    # /del_last — удалить последнюю операцию
+    @dp.message(Command("del_last"))
+    async def cmd_del_last(message: Message):
+        telegram_id = message.from_user.id
+
+        try:
+            tx = await api_delete_last_transaction(telegram_id)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                try:
+                    detail = e.response.json().get("detail", "")
+                except Exception:
+                    detail = ""
+                await message.answer(detail or "У тебя ещё нет транзакций 🙂")
+                return
+
+            print(f"HTTP ошибка /del_last: {e}")
+            await message.answer(
+                "Не получилось удалить последнюю операцию 😔\n"
+                "Попробуй позже."
+            )
+            return
+        except Exception as e:
+            print(f"Ошибка /del_last: {e}")
+            await message.answer(
+                "Не получилось удалить последнюю операцию 😔\n"
+                "Попробуй позже."
+            )
+            return
+
+        # Показываем, что именно удалили
+        await send_tx_confirmation(
+            message,
+            tx,
+            source_text="",
+            via_ai=False,
+            prefix="Удалил последнюю операцию:",
+        )
+        # Можно дописать пояснение
+        await message.answer(
+            "Если удалил случайно — просто внеси эту операцию ещё раз 🙂"
         )
 
     # /remind_add — создать напоминание

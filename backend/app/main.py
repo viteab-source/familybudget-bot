@@ -1529,6 +1529,68 @@ def set_last_transaction_category(
     db.refresh(tx)
     return tx
 
+@app.get("/transactions/last", response_model=schemas.TransactionRead)
+def get_last_transaction(
+    db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
+):
+    """
+    Вернуть последнюю транзакцию текущего пользователя в его семье.
+    """
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    tx = (
+        db.query(models.Transaction)
+        .filter(
+            models.Transaction.household_id == household.id,
+            models.Transaction.user_id == user.id,
+        )
+        .order_by(models.Transaction.created_at.desc())
+        .first()
+    )
+
+    if not tx:
+        raise HTTPException(
+            status_code=404,
+            detail="У тебя ещё нет транзакций",
+        )
+
+    return tx
+
+
+@app.post("/transactions/delete-last", response_model=schemas.TransactionRead)
+def delete_last_transaction(
+    db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
+):
+    """
+    Удалить последнюю транзакцию текущего пользователя в его семье.
+    Возвращаем удалённую транзакцию (чтобы бот мог показать, что именно удалили).
+    """
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    tx = (
+        db.query(models.Transaction)
+        .filter(
+            models.Transaction.household_id == household.id,
+            models.Transaction.user_id == user.id,
+        )
+        .order_by(models.Transaction.created_at.desc())
+        .first()
+    )
+
+    if not tx:
+        raise HTTPException(
+            status_code=404,
+            detail="У тебя ещё нет транзакций",
+        )
+
+    # Просто удаляем запись и коммитим
+    db.delete(tx)
+    db.commit()
+
+    return tx
+
 @app.post(
     "/transactions/parse-and-create",
     response_model=schemas.TransactionRead,
