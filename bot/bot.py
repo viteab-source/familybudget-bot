@@ -195,6 +195,30 @@ async def api_get_categories(telegram_id: int):
         resp.raise_for_status()
         return resp.json()
 
+async def api_delete_category(telegram_id: int, name: str):
+    """Удалить категорию по имени (если по ней нет операций)."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{API_BASE_URL}/categories/delete",
+            params={"telegram_id": telegram_id, "name": name},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+async def api_create_category(telegram_id: int, name: str):
+    """Создать новую категорию для текущей семьи."""
+    payload = {"name": name}
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{API_BASE_URL}/categories",
+            params={"telegram_id": telegram_id},
+            json=payload,
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 async def api_set_last_transaction_category(telegram_id: int, category: str):
     """Поменять категорию у последней транзакции пользователя."""
@@ -1832,6 +1856,62 @@ async def main():
             f"({amount:.2f} {currency})."
         )
 
+    # /cat_add НАЗВАНИЕ — создать новую категорию
+    @dp.message(Command("cat_add"))
+    async def cmd_cat_add(message: Message):
+        """
+        Примеры:
+        /cat_add Продукты
+        /cat_add Детям
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await message.answer(
+                "Как создать категорию:\n"
+                "/cat_add НазваниеКатегории\n\n"
+                "Пример: /cat_add Продукты"
+            )
+            return
+
+        name = parts[1].strip()
+
+        try:
+            cat = await api_create_category(
+                telegram_id=message.from_user.id,
+                name=name,
+            )
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code
+            detail = ""
+            try:
+                detail = e.response.json().get("detail", "")
+            except Exception:
+                pass
+
+            if code == 400:
+                # Скорее всего, пустое имя или дубликат
+                await message.answer(
+                    detail
+                    or "Не удалось создать категорию. "
+                       "Проверь, что имя не пустое и такой категории ещё нет."
+                )
+            else:
+                await message.answer(
+                    "Не удалось создать категорию 😔\n"
+                    f"Код ошибки: {code}"
+                )
+            return
+        except Exception as e:
+            print(f"Ошибка /cat_add: {e}")
+            await message.answer(
+                "Не удалось создать категорию 😔\n"
+                "Попробуй ещё раз позже."
+            )
+            return
+
+        await message.answer(f"✅ Категория «{cat.get('name')}» создана.")
+
     # /cat_rename СТАРОЕ НОВОЕ — переименовать категорию
     @dp.message(Command("cat_rename"))
     async def cmd_cat_rename(message: Message):
@@ -1899,6 +1979,65 @@ async def main():
             f"Готово ✅\n"
             f"Категория переименована в «{cat.get('name') or new_name}»."
         )
+
+    # /cat_delete НАЗВАНИЕ — удалить категорию (если нет операций)
+    @dp.message(Command("cat_delete"))
+    async def cmd_cat_delete(message: Message):
+        """
+        Пример:
+        /cat_delete Игрушки
+
+        Важно:
+        - удалить можно только категорию, по которой нет операций;
+        - если есть операции — используй /cat_merge СТАРАЯ НОВАЯ.
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await message.answer(
+                "Как удалить категорию:\n"
+                "/cat_delete НазваниеКатегории\n\n"
+                "Пример:\n"
+                "/cat_delete Игрушки\n\n"
+                "Если по категории есть операции — сначала объедини её с другой через:\n"
+                "/cat_merge СТАРАЯ НОВАЯ"
+            )
+            return
+
+        name = parts[1].strip()
+
+        try:
+            cat = await api_delete_category(
+                telegram_id=message.from_user.id,
+                name=name,
+            )
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code
+            detail = ""
+            try:
+                detail = e.response.json().get("detail", "")
+            except Exception:
+                pass
+
+            if code == 404:
+                await message.answer(detail or f"Категория «{name}» не найдена.")
+            elif code == 400:
+                await message.answer(detail or "Нельзя удалить эту категорию.")
+            else:
+                await message.answer(
+                    "Не удалось удалить категорию 😔\n"
+                    f"Код ошибки: {code}"
+                )
+            return
+        except Exception as e:
+            print(f"Ошибка /cat_delete: {e}")
+            await message.answer(
+                "Не удалось удалить категорию 😔\n"
+                "Попробуй ещё раз позже."
+            )
+            return
+
+        await message.answer(f"🗑 Категория «{cat.get('name')}» удалена.")
 
     # /cat_merge СТАРАЯ НОВАЯ — объединить категории
     @dp.message(Command("cat_merge"))

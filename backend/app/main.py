@@ -1439,6 +1439,67 @@ def merge_categories(
     db.refresh(target_cat)
     return target_cat
 
+@app.post("/categories/delete", response_model=schemas.CategoryRead)
+def delete_category(
+    name: str = Query(..., description="Название категории, которую нужно удалить"),
+    db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
+):
+    """
+    Удалить категорию в текущей семье.
+
+    Важно:
+    - удаляем только если НЕТ транзакций с этой категорией;
+    - если есть операции — просим использовать /cat_merge.
+    """
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    name_clean = (name or "").strip()
+    if not name_clean:
+        raise HTTPException(status_code=400, detail="Название категории не может быть пустым")
+
+    # Ищем категорию внутри семьи без учёта регистра
+    cat = (
+        db.query(models.Category)
+        .filter(
+            models.Category.household_id == household.id,
+            func.lower(models.Category.name) == func.lower(name_clean),
+        )
+        .first()
+    )
+
+    if not cat:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Категория «{name_clean}» не найдена.",
+        )
+
+    # Проверяем, есть ли транзакции с этой категорией
+    tx_count = (
+        db.query(func.count(models.Transaction.id))
+        .filter(
+            models.Transaction.household_id == household.id,
+            models.Transaction.category_id == cat.id,
+        )
+        .scalar()
+        or 0
+    )
+
+    if tx_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Нельзя удалить категорию «{cat.name}», по которой есть операции "
+                f"({tx_count} шт.). Сначала объедини её с другой через /cat_merge."
+            ),
+        )
+
+    # Всё чисто — можно удалять
+    db.delete(cat)
+    db.commit()
+
+    return cat
+
 @app.post("/budget/set", response_model=dict)
 def set_budget(
     category_name: str = Query(..., description="Название категории"),
