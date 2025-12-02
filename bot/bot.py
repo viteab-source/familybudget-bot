@@ -210,6 +210,27 @@ async def api_set_last_transaction_category(telegram_id: int, category: str):
         resp.raise_for_status()
         return resp.json()
 
+async def api_edit_last_transaction(
+    telegram_id: int,
+    new_amount: float | None = None,
+    new_description: str | None = None,
+):
+    """Изменить последнюю транзакцию пользователя."""
+    params = {"telegram_id": telegram_id}
+    if new_amount is not None:
+        params["new_amount"] = new_amount
+    if new_description is not None and new_description.strip():
+        params["new_description"] = new_description.strip()
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{API_BASE_URL}/transactions/edit-last",
+            params=params,
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
 async def api_get_last_transaction(telegram_id: int):
     """Получить последнюю транзакцию пользователя."""
     async with httpx.AsyncClient() as client:
@@ -1187,6 +1208,88 @@ async def main():
         # Можно дописать пояснение
         await message.answer(
             "Если удалил случайно — просто внеси эту операцию ещё раз 🙂"
+        )
+
+    # /edit_last — изменить сумму и/или описание последней операции
+    @dp.message(Command("edit_last"))
+    async def cmd_edit_last(message: Message):
+        """
+        /edit_last 1500                — поменять только сумму
+        /edit_last 1500 обед в кафе    — сумма + описание
+        /edit_last обед в кафе         — только описание
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+        if len(parts) == 1:
+            await message.answer(
+                "Как изменить последнюю операцию?\n"
+                "Варианты:\n"
+                "• /edit_last 1500 — поменять только сумму\n"
+                "• /edit_last 1500 обед в кафе — сумма и описание\n"
+                "• /edit_last обед в кафе — только описание\n"
+                "Категорию можно сменить через /setcat НоваяКатегория."
+            )
+            return
+
+        rest = parts[1].strip()
+        new_amount: float | None = None
+        new_description: str | None = None
+
+        # Пытаемся считать первое слово как число
+        first, *rest_parts = rest.split(maxsplit=1)
+        token = first.replace(",", ".")
+        try:
+            new_amount = float(token)
+            new_description = rest_parts[0].strip() if rest_parts else None
+        except ValueError:
+            # Чисто описание, без суммы
+            new_amount = None
+            new_description = rest
+
+        if new_amount is None and (not new_description or not new_description.strip()):
+            await message.answer(
+                "Нужно указать либо новую сумму, либо новое описание."
+            )
+            return
+
+        try:
+            tx = await api_edit_last_transaction(
+                telegram_id=message.from_user.id,
+                new_amount=new_amount,
+                new_description=new_description,
+            )
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code
+            detail = ""
+            try:
+                detail = e.response.json().get("detail", "")
+            except Exception:
+                pass
+
+            if code == 404:
+                await message.answer(detail or "У тебя ещё нет транзакций 🙂")
+            elif code == 400:
+                await message.answer(detail or "Нечего менять — передай сумму или описание.")
+            else:
+                await message.answer(
+                    "Не получилось изменить последнюю операцию 😔\n"
+                    f"Код ошибки: {code}"
+                )
+            return
+        except Exception as e:
+            print(f"Ошибка /edit_last: {e}")
+            await message.answer(
+                "Не получилось изменить последнюю операцию 😔\n"
+                "Попробуй ещё раз чуть позже."
+            )
+            return
+
+        await send_tx_confirmation(
+            message,
+            tx,
+            source_text="",
+            via_ai=False,
+            prefix="Обновил последнюю операцию:",
         )
 
     # /remind_add — создать напоминание

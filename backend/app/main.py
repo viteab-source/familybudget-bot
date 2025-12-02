@@ -1591,6 +1591,57 @@ def delete_last_transaction(
 
     return tx
 
+@app.post("/transactions/edit-last", response_model=schemas.TransactionRead)
+def edit_last_transaction(
+    new_amount: float | None = Query(default=None),
+    new_description: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
+):
+    """
+    Изменить сумму и/или описание последней транзакции текущего пользователя.
+    """
+    if new_amount is None and (new_description is None or not new_description.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="Нужно передать новую сумму и/или новое описание.",
+        )
+
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    tx = (
+        db.query(models.Transaction)
+        .filter(
+            models.Transaction.household_id == household.id,
+            models.Transaction.user_id == user.id,
+        )
+        .order_by(models.Transaction.created_at.desc())
+        .first()
+    )
+
+    if not tx:
+        raise HTTPException(
+            status_code=404,
+            detail="У тебя ещё нет транзакций.",
+        )
+
+    if new_amount is not None:
+        tx.amount = new_amount
+    if new_description is not None and new_description.strip():
+        tx.description = new_description.strip()
+
+    db.commit()
+    db.refresh(tx)
+
+    # Обновляем информацию по бюджету (если есть такая функция)
+    try:
+        attach_budget_info_to_tx(db, household, tx)  # type: ignore[name-defined]
+    except NameError:
+        # Если attach_budget_info_to_tx ещё не добавляли — просто пропускаем
+        pass
+
+    return tx
+
 @app.post(
     "/transactions/parse-and-create",
     response_model=schemas.TransactionRead,

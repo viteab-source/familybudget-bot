@@ -33,6 +33,10 @@ class TransactionRead(TransactionBase):
     user_id: Optional[int] = None
     created_at: datetime
 
+    # Новое: данные по бюджету (если есть)
+    budget_limit: Optional[float] = None
+    budget_spent: Optional[float] = None
+    budget_percent: Optional[float] = None
 
 # -----------------------
 # ОТЧЁТЫ
@@ -66,6 +70,25 @@ class BalanceReport(BaseModel):
     incomes_total: float
     net: float
     currency: str
+
+class MemberExpenseSummary(BaseModel):
+    """
+    Сумма расходов по одному участнику семьи за период.
+    """
+    user_id: int
+    name: Optional[str] = None
+    telegram_id: Optional[int] = None
+    amount: float
+
+
+class MembersReport(BaseModel):
+    """
+    Отчёт по людям:
+    кто сколько потратил за период.
+    """
+    days: int
+    currency: str
+    members: List[MemberExpenseSummary]
 
 
 # -----------------------
@@ -174,3 +197,35 @@ class UserSetNameRequest(BaseModel):
 
 class ParseTextRequest(BaseModel):
     text: str
+
+# -----------------------
+# КАТЕГОРИИ 2.0
+# -----------------------
+
+
+class CategoryBase(BaseModel):
+    """
+    Базовая схема категории.
+    household_id на клиенте не передаём — бекенд подставит сам.
+    """
+    name: str
+    parent_id: Optional[int] = None
+    sort_order: Optional[int] = None
+
+
+class CategoryCreate(CategoryBase):
+    """
+    Тело запроса для создания категории.
+    Пока совпадает с базовой схемой.
+    """
+    pass
+
+
+class CategoryRead(CategoryBase):
+    """
+    То, что возвращаем наружу.
+    """
+    id: int
+
+    class Config:
+        orm_mode = True
