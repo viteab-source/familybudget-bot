@@ -386,6 +386,58 @@ async def stt_recognize_ogg(data: bytes, lang: str = "ru-RU") -> str:
 
     return payload.get("result", "")
 
+async def send_tx_confirmation(
+    message: Message,
+    tx: dict,
+    source_text: str,
+    via_ai: bool = False,
+    prefix: str | None = None,
+):
+    """
+    Красивое сообщение после записи расхода/дохода.
+    tx — это словарь, который вернул backend (/transactions или /transactions/parse-and-create).
+    """
+    # Достаём поля из транзакции
+    amount = tx.get("amount", 0.0) or 0.0
+    currency = tx.get("currency") or "RUB"
+    category = tx.get("category") or "Без категории"
+    description = tx.get("description") or ""
+    kind = (tx.get("kind") or "expense").lower()
+
+    # Пробуем аккуратно показать дату
+    date_raw = tx.get("date") or tx.get("created_at")
+    pretty_date = ""
+    if isinstance(date_raw, str):
+        try:
+            dt = datetime.fromisoformat(date_raw)
+            pretty_date = dt.strftime("%d.%m.%Y")
+        except ValueError:
+            pretty_date = date_raw
+    elif isinstance(date_raw, datetime):
+        pretty_date = date_raw.strftime("%d.%m.%Y")
+
+    kind_text = "Расход" if kind == "expense" else "Доход"
+
+    lines: list[str] = []
+
+    # Если передали префикс (например, "Записал доход:")
+    if prefix:
+        lines.append(prefix)
+        lines.append("")  # пустая строка
+
+    lines.append(f"{kind_text}: {amount:.2f} {currency}")
+    lines.append(f"Категория: {category}")
+    if description:
+        lines.append(f"Описание: {description}")
+    if pretty_date:
+        lines.append(f"Дата: {pretty_date}")
+
+    if via_ai:
+        lines.append("")
+        lines.append("🧠 Распознал это сообщение через ИИ:")
+        lines.append(f"«{source_text}»")
+
+    await message.answer("\n".join(lines))
 
 # -----------------------
 # ОСНОВНАЯ ЛОГИКА БОТА
@@ -1675,6 +1727,93 @@ async def main():
             caption=f"Экспорт транзакций за последние {days} дней.",
         )
 
+    # /budget_set НАЗВАНИЕ СУММА — установить лимит на месяц
+    @dp.message(Command("budget_set"))
+    async def cmd_budget_set(message: Message):
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3:
+            await message.answer(
+                "Формат: /budget_set Категория Сумма\n"
+                "Пример: /budget_set Продукты 50000"
+            )
+            return
+
+        cat, limit = parts[1], parts[2]
+        try:
+            limit_val = float(limit)
+        except ValueError:
+            await message.answer("Сумма должна быть числом")
+            return
+
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{API_BASE_URL}/budget/set",
+                    params={
+                        "telegram_id": message.from_user.id,
+                        "category_name": cat,
+                        "limit_amount": limit_val,
+                    },
+                )
+                text = resp.text
+                if resp.status_code != 200:
+                    await message.answer(f"⚠️ Ошибка: {resp.status_code}\n{text}")
+                    return
+                data = resp.json()
+                await message.answer(
+                    f"✅ Установлен лимит: {data.get('category')} — "
+                    f"{data.get('limit')} RUB на {data.get('period')}"
+                )
+        except Exception as e:
+            await message.answer(f"Ошибка при установке лимита: {e}")
+
+    # /budget_status — показать лимиты и траты
+    @dp.message(Command("budget_status"))
+    async def cmd_budget_status(message: Message):
+        # 1. Забираем данные с бэка
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{API_BASE_URL}/budget/status",
+                    params={"telegram_id": message.from_user.id},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as e:
+            await message.answer(f"Не удалось получить бюджеты: {e}")
+            return
+
+        month = data.get("month", "")
+        budgets = data.get("budgets") or []
+
+        # 2. Если бюджетов нет
+        if not budgets:
+            await message.answer(
+                f"📆 {month}\n"
+                "Пока нет бюджетов.\n"
+                "Можешь задать через /budget_set Категория Сумма"
+            )
+            return
+
+        # 3. Формируем красивые строки
+        lines = [f"📆 Бюджеты на {month}:"]
+        for b in budgets:
+            # аккуратно приводим всё к числам
+            limit_val = float(b.get("limit", 0) or 0)
+            spent_val = float(b.get("spent", 0) or 0)
+            percent = float(b.get("percent", 0) or 0)
+
+            warn = "🟡" if 80 <= percent < 100 else "🔴" if percent >= 100 else ""
+
+            lines.append(
+                f"{b.get('category')}: "
+                f"{spent_val:.0f}/{limit_val:.0f} RUB "
+                f"({percent:.1f}%) {warn}"
+            )
+
+        # 4. Отправляем в чат
+        await message.answer("\n".join(lines))
+
     # Голосовые — как раньше (пока STT не работает)
     @dp.message(F.voice)
     async def handle_voice(message: Message):
@@ -1785,102 +1924,6 @@ async def main():
         await dp.start_polling(bot)
     finally:
         logger.info("Бот остановлен.")
-
-async def send_tx_confirmation(
-    message: Message,
-    tx: dict,
-    source_text: str,
-    via_ai: bool = False,
-    prefix: str | None = None,
-):
-    """
-    Универсальное подтверждение транзакции.
-    Используется и для /add, и для /aiadd, и для свободного текста.
-    """
-    amount = tx.get("amount")
-    currency = tx.get("currency") or "RUB"
-    category = tx.get("category")
-    description = tx.get("description") or ""
-    date_str = tx.get("date")
-
-    # Дату отображаем просто как YYYY-MM-DD
-    if isinstance(date_str, str) and "T" in date_str:
-        date_human = date_str.split("T")[0]
-    else:
-        date_human = str(date_str) if date_str else ""
-
-    header = "Записал расход через ИИ:" if via_ai else "Записал расход:"
-
-    lines = [
-        header,
-        f"{amount} {currency}",
-    ]
-
-    if category:
-        lines.append(f"Категория: {category}")
-    else:
-        lines.append("Категория: (не указана)")
-        lines.append("Можно задать: /setcat НАЗВАНИЕ")
-
-    if description:
-        lines.append(f"Описание: {description}")
-
-    if date_human:
-        lines.append(f"Дата: {date_human}")
-
-    # Если хотим что-то дописать сверху (редкие случаи) — используем prefix
-    text = "\n".join(lines)
-    if prefix:
-        text = prefix + "\n" + text
-
-    await message.answer(text)
-
-    # /budget_set НАЗВАНИЕ СУММА — установить лимит на месяц
-    @dp.message(Command("budget_set"))
-    async def cmd_budget_set(message: Message):
-        parts = message.text.split(maxsplit=2)
-        if len(parts) < 3:
-            await message.answer("Формат: /budget_set Категория Сумма\nПример: /budget_set Продукты 50000")
-            return
-        cat, limit = parts[1], parts[2]
-        try:
-            limit_val = float(limit)
-        except:
-            await message.answer("Сумма должна быть числом")
-            return
-
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{API_BASE_URL}/budget/set",
-                    params={"telegram_id": message.from_user.id, "category_name": cat, "limit_amount": limit_val},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                await message.answer(f"✅ Установлен лимит: {data['category']} — {data['limit']} RUB на {data['period']}")
-        except httpx.HTTPStatusError as e:
-            await message.answer("Ошибка при установке лимита: " + e.response.text)
-
-    # /budget_status — показать лимиты и траты
-    @dp.message(Command("budget_status"))
-    async def cmd_budget_status(message: Message):
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{API_BASE_URL}/budget/status", params={"telegram_id": message.from_user.id})
-                resp.raise_for_status()
-                data = resp.json()
-
-            lines = [f"📆 {data['month']}"]
-            for b in data["budgets"]:
-                warn = "⚠️" if b["percent"] >= 80 else ""
-                lines.append(
-                    f"{b['category']}: {b['spent']:.0f}/{b['limit']:.0f} RUB ({b['percent']}%) {warn}"
-                )
-            if len(lines) == 1:
-                lines.append("Пока нет бюджетов.")
-            await message.answer("\n".join(lines))
-        except Exception as e:
-            await message.answer(f"Не удалось получить бюджеты: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())

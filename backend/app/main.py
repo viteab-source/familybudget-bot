@@ -1350,10 +1350,28 @@ def budget_status(
     db: Session = Depends(get_db),
     telegram_id: int | None = Query(default=None),
 ):
+    """
+    Статус бюджетов по категориям за текущий месяц.
+    Возвращает:
+    {
+      "month": "2025-12",
+      "budgets": [
+        { "category": "Продукты", "limit": 50000, "spent": 12345, "percent": 24.7 },
+        ...
+      ]
+    }
+    """
     user, household = get_or_create_user_and_household(db, telegram_id)
 
     now = datetime.utcnow()
     period_month = now.strftime("%Y-%m")
+
+    # Границы текущего месяца: [month_start; next_month_start)
+    month_start = datetime(now.year, now.month, 1)
+    if now.month == 12:
+        next_month_start = datetime(now.year + 1, 1, 1)
+    else:
+        next_month_start = datetime(now.year, now.month + 1, 1)
 
     budgets = (
         db.query(models.CategoryBudget)
@@ -1364,7 +1382,7 @@ def budget_status(
         .all()
     )
 
-    result = []
+    result: list[dict] = []
     for b in budgets:
         spent = (
             db.query(func.sum(models.Transaction.amount))
@@ -1372,12 +1390,15 @@ def budget_status(
                 models.Transaction.household_id == household.id,
                 models.Transaction.category_id == b.category_id,
                 models.Transaction.kind == "expense",
-                func.strftime("%Y-%m", models.Transaction.date) == period_month,
+                models.Transaction.date >= month_start,
+                models.Transaction.date < next_month_start,
             )
             .scalar()
             or 0
         )
+
         percent = round((spent / b.limit_amount) * 100, 1) if b.limit_amount > 0 else 0
+
         result.append(
             {
                 "category": b.category.name,
