@@ -105,6 +105,67 @@ def get_or_create_user_and_household(
 
 INVITE_CODE_LENGTH = 8
 
+def attach_budget_info_to_tx(
+    db: Session,
+    household: models.Household,
+    tx: models.Transaction,
+) -> None:
+    """
+    Дополнить объект транзакции полями:
+      - budget_limit
+      - budget_spent
+      - budget_percent
+    Если бюджета для категории нет — просто ничего не делаем.
+    """
+    # Только для расходов и только если есть категория
+    if tx.kind != "expense" or not tx.category_id:
+        return
+
+    tx_date = tx.date or datetime.utcnow()
+    period_month = tx_date.strftime("%Y-%m")
+
+    # Границы месяца
+    month_start = datetime(tx_date.year, tx_date.month, 1)
+    if tx_date.month == 12:
+        next_month_start = datetime(tx_date.year + 1, 1, 1)
+    else:
+        next_month_start = datetime(tx_date.year, tx_date.month + 1, 1)
+
+    # Ищем бюджет для этой категории
+    budget = (
+        db.query(models.CategoryBudget)
+        .filter(
+            models.CategoryBudget.household_id == household.id,
+            models.CategoryBudget.category_id == tx.category_id,
+            models.CategoryBudget.period_month == period_month,
+        )
+        .first()
+    )
+    if not budget:
+        return
+
+    # Считаем, сколько уже потрачено за месяц по этой категории
+    spent = (
+        db.query(func.sum(models.Transaction.amount))
+        .filter(
+            models.Transaction.household_id == household.id,
+            models.Transaction.category_id == tx.category_id,
+            models.Transaction.kind == "expense",
+            models.Transaction.date >= month_start,
+            models.Transaction.date < next_month_start,
+        )
+        .scalar()
+        or 0
+    )
+
+    limit_val = float(budget.limit_amount or 0)
+    spent_val = float(spent)
+    percent = (spent_val / limit_val * 100) if limit_val > 0 else 0.0
+
+    # Вешаем на объект tx новые атрибуты — Pydantic их заберёт
+    tx.budget_limit = limit_val
+    tx.budget_spent = spent_val
+    tx.budget_percent = round(percent, 1)
 
 def generate_invite_code(db: Session, length: int = INVITE_CODE_LENGTH) -> str:
     """
@@ -136,8 +197,6 @@ def generate_invite_code(db: Session, length: int = INVITE_CODE_LENGTH) -> str:
         status_code=500,
         detail="Не удалось сгенерировать код приглашения, попробуй ещё раз",
     )
-
-
 
 # -----------------------
 # СТАРТ ПРИЛОЖЕНИЯ
@@ -747,6 +806,8 @@ def create_transaction(
     db.add(db_tx)
     db.commit()
     db.refresh(db_tx)
+    # Дополняем транзакцию данными по бюджету (если есть)
+    attach_budget_info_to_tx(db, household, db_tx)
     return db_tx
 
 
@@ -1580,9 +1641,16 @@ def parse_and_create_transaction(
         db.refresh(db_tx)
     except SQLAlchemyError as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка при сохранении транзакции: {e}",
+        )
+
+    # Дополняем транзакцию данными по бюджету (если есть)
+    attach_budget_info_to_tx(db, household, db_tx)
 
     return db_tx
+
 
 # -----------------------
 # НАПОМИНАНИЯ

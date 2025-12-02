@@ -34,7 +34,6 @@ async def _clear_family_leave_confirmation(user_id: int, delay_seconds: int = 60
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ API
 # -----------------------
 
-
 async def api_create_transaction(
     telegram_id: int,
     amount: float,
@@ -395,16 +394,16 @@ async def send_tx_confirmation(
 ):
     """
     Красивое сообщение после записи расхода/дохода.
-    tx — это словарь, который вернул backend (/transactions или /transactions/parse-and-create).
+    tx — это json-ответ от бэкенда (/transactions или /transactions/parse-and-create).
     """
-    # Достаём поля из транзакции
-    amount = tx.get("amount", 0.0) or 0.0
+    # Базовые поля
+    amount = float(tx.get("amount", 0) or 0)
     currency = tx.get("currency") or "RUB"
     category = tx.get("category") or "Без категории"
     description = tx.get("description") or ""
     kind = (tx.get("kind") or "expense").lower()
 
-    # Пробуем аккуратно показать дату
+    # Дата
     date_raw = tx.get("date") or tx.get("created_at")
     pretty_date = ""
     if isinstance(date_raw, str):
@@ -412,7 +411,7 @@ async def send_tx_confirmation(
             dt = datetime.fromisoformat(date_raw)
             pretty_date = dt.strftime("%d.%m.%Y")
         except ValueError:
-            pretty_date = date_raw
+            pretty_date = date_raw or ""
     elif isinstance(date_raw, datetime):
         pretty_date = date_raw.strftime("%d.%m.%Y")
 
@@ -420,10 +419,10 @@ async def send_tx_confirmation(
 
     lines: list[str] = []
 
-    # Если передали префикс (например, "Записал доход:")
+    # Префикс типа "Записал доход:" если передан
     if prefix:
         lines.append(prefix)
-        lines.append("")  # пустая строка
+        lines.append("")
 
     lines.append(f"{kind_text}: {amount:.2f} {currency}")
     lines.append(f"Категория: {category}")
@@ -432,6 +431,41 @@ async def send_tx_confirmation(
     if pretty_date:
         lines.append(f"Дата: {pretty_date}")
 
+    # ---- БЛОК ПРО БЮДЖЕТ ----
+    budget_limit = tx.get("budget_limit")
+    budget_spent = tx.get("budget_spent")
+    budget_percent = tx.get("budget_percent")
+
+    # Бюджет показываем только для расходов и только если есть данные
+    if (
+        kind == "expense"
+        and budget_limit is not None
+        and budget_spent is not None
+        and budget_percent is not None
+    ):
+        try:
+            limit_val = float(budget_limit)
+            spent_val = float(budget_spent)
+            percent = float(budget_percent)
+        except (TypeError, ValueError):
+            limit_val = spent_val = percent = None
+
+        if limit_val and percent is not None:
+            lines.append("")
+            if percent >= 100:
+                lines.append(
+                    f"🔴 Бюджет по категории почти или уже превышен!"
+                )
+                lines.append(
+                    f"Потрачено {spent_val:.0f} из {limit_val:.0f} RUB ({percent:.1f}%)."
+                )
+            elif percent >= 80:
+                lines.append(
+                    f"🟡 Внимание: выбрано уже {percent:.1f}% бюджета "
+                    f"({spent_val:.0f}/{limit_val:.0f} RUB)."
+                )
+
+    # ---- Если расход прописал ИИ, покажем исходный текст ----
     if via_ai:
         lines.append("")
         lines.append("🧠 Распознал это сообщение через ИИ:")
