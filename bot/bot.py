@@ -375,6 +375,16 @@ async def api_export_csv(telegram_id: int, days: int = 30):
         resp.raise_for_status()
         return resp.content
 
+async def api_report_shops(telegram_id: int, days: int = 30):
+    """Отчёт по магазинам за N дней."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{API_BASE_URL}/report/shops",
+            params={"telegram_id": telegram_id, "days": days},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 # -----------------------
 # STT (пока не работает из-за прав, но код оставим)
@@ -1608,6 +1618,69 @@ async def main():
             cat = item.get("category") or "Без категории"
             amt = item.get("amount", 0)
             lines.append(f"- {cat}: {amt:.2f} {currency}")
+
+        await message.answer("\n".join(lines))
+
+    # /report_shops [дни] — отчёт по магазинам
+    @dp.message(Command("report_shops"))
+    async def cmd_report_shops(message: Message):
+        """
+        /report_shops — магазины за 30 дней
+        /report_shops 60 — за 60 дней
+        """
+        text = message.text or ""
+        parts = text.split(maxsplit=1)
+        days = 30
+        if len(parts) == 2:
+            arg = parts[1].strip()
+            try:
+                days_val = int(arg)
+                if 1 <= days_val <= 365:
+                    days = days_val
+            except ValueError:
+                pass  # если не число — оставляем 30
+
+        try:
+            data = await api_report_shops(
+                telegram_id=message.from_user.id,
+                days=days,
+            )
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code
+            detail = ""
+            try:
+                detail = e.response.json().get("detail", "")
+            except Exception:
+                pass
+            await message.answer(
+                "Не получилось получить отчёт по магазинам 😔\n"
+                f"Код ошибки: {code} {detail}"
+            )
+            return
+        except Exception as e:
+            print(f"Ошибка /report_shops: {e}")
+            await message.answer(
+                "Не получилось получить отчёт по магазинам 😔\n"
+                "Попробуй ещё раз позже."
+            )
+            return
+
+        shops = data.get("shops") or []
+        days_actual = data.get("days", days)
+        currency = data.get("currency", "RUB")
+
+        if not shops:
+            await message.answer(
+                f"За последние {days_actual} дн. не нашли расходов, "
+                "которые можно привязать к магазинам."
+            )
+            return
+
+        lines = [f"🛒 Топ магазинов за {days_actual} дн.:"]
+        for idx, shop in enumerate(shops, start=1):
+            name = shop.get("merchant")
+            amount = float(shop.get("amount", 0) or 0)
+            lines.append(f"{idx}. {name} — {amount:.0f} {currency}")
 
         await message.answer("\n".join(lines))
 

@@ -198,6 +198,35 @@ def generate_invite_code(db: Session, length: int = INVITE_CODE_LENGTH) -> str:
         detail="Не удалось сгенерировать код приглашения, попробуй ещё раз",
     )
 
+MERCHANT_KEYWORDS = {
+    "пятерочка": "Пятёрочка",
+    "5ка": "Пятёрочка",
+    "перекресток": "Перекрёсток",
+    "перекрёсток": "Перекрёсток",
+    "дикси": "Дикси",
+    "магнит": "Магнит",
+    "кб ": "Красное&Белое",
+    "кб": "Красное&Белое",
+    "к&б": "Красное&Белое",
+    "красное&белое": "Красное&Белое",
+    "лента": "Лента",
+    "ашан": "Ашан",
+    "wildberries": "Wildberries",
+    "wb": "Wildberries",
+    "озон": "Ozon",
+    "ozon": "Ozon",
+}
+
+
+def extract_merchant_from_text(text: str | None) -> str | None:
+    if not text:
+        return None
+    low = text.lower()
+    for key, merchant in MERCHANT_KEYWORDS.items():
+        if key in low:
+            return merchant
+    return None
+
 # -----------------------
 # СТАРТ ПРИЛОЖЕНИЯ
 # -----------------------
@@ -1011,6 +1040,57 @@ def report_members(
         members=members,
     )
 
+@app.get("/report/shops", response_model=schemas.ShopsReport)
+def report_shops(
+    days: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db),
+    telegram_id: int | None = Query(default=None),
+):
+    """Отчёт по магазинам (merchant) за N дней."""
+    since = datetime.utcnow() - timedelta(days=days)
+
+    user, household = get_or_create_user_and_household(db, telegram_id)
+
+    # Берём только расходы за период
+    txs = (
+        db.query(models.Transaction)
+        .filter(
+            models.Transaction.household_id == household.id,
+            models.Transaction.date >= since,
+            models.Transaction.kind == "expense",
+        )
+        .all()
+    )
+
+    totals: dict[str, float] = {}
+
+    for tx in txs:
+        # Пробуем вытащить merchant из description
+        merchant = extract_merchant_from_text(tx.description)
+        if not merchant:
+            # можно попробовать из строкового поля category (старое)
+            merchant = extract_merchant_from_text(tx.category)
+        if not merchant:
+            continue
+
+        amount = float(tx.amount or 0)
+        totals[merchant] = totals.get(merchant, 0.0) + amount
+
+    # Собираем список, убираем нулевые
+    shops = [
+        schemas.ShopSummary(merchant=name, amount=round(total, 2))
+        for name, total in totals.items()
+        if total > 0
+    ]
+
+    # Сортируем по сумме
+    shops.sort(key=lambda s: s.amount, reverse=True)
+
+    return schemas.ShopsReport(
+        days=days,
+        currency=household.currency,
+        shops=shops,
+    )
 
 @app.get("/transactions/export/csv")
 def export_transactions_csv(

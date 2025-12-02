@@ -90,6 +90,18 @@ class MembersReport(BaseModel):
     currency: str
     members: List[MemberExpenseSummary]
 
+class ShopSummary(BaseModel):
+    merchant: str
+    amount: float
+
+    class Config:
+        from_attributes = True
+
+
+class ShopsReport(BaseModel):
+    days: int
+    currency: str
+    shops: List[ShopSummary]
 
 # -----------------------
 # НАПОМИНАНИЯ
