@@ -1,82 +1,94 @@
-"""
-main.py — главная точка входа FastAPI приложения.
-
-После рефакторинга этот файл содержит только:
-1. Инициализацию FastAPI
-2. Подключение всех роутеров из api/*
-3. Хендлер при старте приложения
-4. Health check
-"""
-
 import logging
-from fastapi import FastAPI
+import time
+from pathlib import Path
+from typing import Callable
 
-from .db import Base, engine, SessionLocal
-from .api import users, transactions, categories, budgets, reminders, reports
+from fastapi import FastAPI, Request
+from starlette.middleware.base import BaseHTTPMiddleware  # <--- ВОТ ВАЖНЫЙ ИМПОРТ
+from starlette.responses import Response
 
-# Настроим логирование
+# Импорты из твоего проекта
+from app.api import users, transactions, categories, budgets, reports, reminders
+from app.db import Base, engine
+from app import ai
+
+# ========================
+# ЛОГИРОВАНИЕ (БАГ ФИХ #2)
+# ========================
+
+# Создаём папку для логов если её нет
+logs_dir = Path("logs")
+logs_dir.mkdir(exist_ok=True)
+
+# Настраиваем логирование
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/api.log'),  # Пишем в файл
+        logging.StreamHandler()  # И в консоль
+    ]
 )
-logger = logging.getLogger("familybudget_api")
 
-# Создаём приложение FastAPI
+logger = logging.getLogger(__name__)
+
+# Middleware для логирования всех запросов
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        start_time = time.time()
+        
+        # Логируем входящий запрос
+        logger.info(f"🔵 {request.method} {request.url.path}")
+        
+        try:
+            response = await call_next(request)
+            
+            # Логируем исходящий ответ
+            duration = time.time() - start_time
+            status_emoji = "✅" if response.status_code < 400 else "⚠️"
+            logger.info(
+                f"{status_emoji} {request.method} {request.url.path} "
+                f"→ {response.status_code} ({duration:.2f}s)"
+            )
+            return response
+            
+        except Exception as e:
+            duration = time.time() - start_time
+            logger.error(
+                f"❌ {request.method} {request.url.path} "
+                f"→ ERROR: {str(e)} ({duration:.2f}s)",
+                exc_info=True
+            )
+            raise
+
+# ========================
+# ИНИЦИАЛИЗАЦИЯ APP
+# ========================
+
+# Создаем таблицы в БД (для dev режима)
+Base.metadata.create_all(bind=engine)
+
 app = FastAPI(
-    title="FamilyBudget API",
-    description="Семейный финансовый ассистент",
-    version="2.0.0",
+    title="FamilyBudget Bot API",
+    description="API для учёта семейных расходов",
+    version="2.0.0"
 )
 
+# Добавляем middleware логирования
+app.add_middleware(LoggingMiddleware)
 
-# -----------------------
-# ИНИЦИАЛИЗАЦИЯ
-# -----------------------
-
-@app.on_event("startup")
-def on_startup():
-    """При старте приложения создаём таблицы БД."""
-    logger.info("Создаю таблицы БД...")
-    Base.metadata.create_all(bind=engine)
-    
-    # Создаём default household для Swagger-тестов
-    db = SessionLocal()
-    try:
-        from .deps import get_or_create_default_household
-        household = get_or_create_default_household(db)
-        logger.info(f"Default household создана: {household.id}")
-    finally:
-        db.close()
-
-
-# -----------------------
-# ЗДОРОВЬЕ ПРИЛОЖЕНИЯ
-# -----------------------
+# Подключаем роутеры
+app.include_router(users.router, prefix="/users", tags=["Users"])
+app.include_router(transactions.router, prefix="/transactions", tags=["Transactions"])
+app.include_router(categories.router, prefix="/categories", tags=["Categories"])
+app.include_router(budgets.router, prefix="/budgets", tags=["Budgets"])
+app.include_router(reports.router, prefix="/reports", tags=["Reports"])
+app.include_router(reminders.router, prefix="/reminders", tags=["Reminders"])
 
 @app.get("/health")
 def health_check():
-    """Проверка здоровья приложения."""
-    return {"status": "ok"}
+    return {"status": "ok", "version": "2.0.0"}
 
-
-# -----------------------
-# ПОДКЛЮЧЕНИЕ РОУТЕРОВ
-# -----------------------
-
-# Пользователи и семьи
-app.include_router(users.router, tags=["Users & Households"])
-
-# Категории
-app.include_router(categories.router, tags=["Categories"])
-
-# Транзакции
-app.include_router(transactions.router, tags=["Transactions"])
-
-# Бюджеты
-app.include_router(budgets.router, tags=["Budgets"])
-
-# Напоминания
-app.include_router(reminders.router, tags=["Reminders"])
-
-# Отчёты
-app.include_router(reports.router, tags=["Reports"])
+@app.get("/")
+def root():
+    return {"message": "FamilyBudget API is running. Go to /docs for Swagger UI."}

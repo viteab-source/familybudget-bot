@@ -1,6 +1,10 @@
 """
 app/ai.py — ИСПРАВЛЕННАЯ ВЕРСИЯ (с fallback парсингом)
 """
+import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 import json
 import os
@@ -20,6 +24,97 @@ def get_model_uri() -> str:
     if not YANDEX_FOLDER_ID:
         raise RuntimeError("YANDEX_FOLDER_ID не задан. Проверь .env")
     return f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite/latest"
+
+async def parse_voice_to_transaction(
+    audio_data: bytes, 
+    timeout: int = 10
+) -> dict:
+    """
+    Парсит голосовое сообщение в транзакцию.
+    С retry логикой и таймаутом для стабильности.
+    
+    Параметры:
+        audio_data: Бинарные данные аудио файла
+        timeout: Сколько секунд ждать ответа от API
+    
+    Возвращает:
+        {
+            "amount": 500.0,
+            "category": "Продукты",
+            "description": "Магазин",
+            "error": None  # Если нет ошибки
+        }
+    """
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        try:
+            # Вызываем YandexGPT с таймаутом
+            result = await asyncio.wait_for(
+                _call_yandex_stt(audio_data),
+                timeout=timeout
+            )
+            return result
+            
+        except asyncio.TimeoutError:
+            # Таймаут: пробуем ещё раз с задержкой
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # 1, 2, 4 секунды
+                logger.warning(
+                    f"STT timeout (попытка {attempt+1}/{max_retries}), "
+                    f"жду {wait_time}с перед повтором..."
+                )
+                await asyncio.sleep(wait_time)
+                continue
+            
+            # Все попытки исчерпаны
+            logger.error("STT: все попытки исчерпаны")
+            return {
+                "amount": None,
+                "category": None,
+                "description": None,
+                "error": "⏱️ Голос слишком долго обрабатывается. Попробуй ещё раз."
+            }
+            
+        except Exception as e:
+            # Другие ошибки API
+            error_msg = str(e).lower()
+            
+            if "invalid_audio" in error_msg or "audio" in error_msg:
+                logger.warning(f"STT: невозможно распознать аудио: {e}")
+                return {
+                    "amount": None,
+                    "category": None,
+                    "description": None,
+                    "error": "🎙️ Не удалось распознать голос. Говори чётче!"
+                }
+            
+            elif "api" in error_msg or "yandex" in error_msg:
+                logger.error(f"STT: ошибка API: {e}")
+                return {
+                    "amount": None,
+                    "category": None,
+                    "description": None,
+                    "error": "🔌 Ошибка сервиса. Попробуй ещё раз через минуту."
+                }
+            
+            else:
+                # Неизвестная ошибка
+                logger.error(f"STT: неизвестная ошибка: {e}", exc_info=True)
+                return {
+                    "amount": None,
+                    "category": None,
+                    "description": None,
+                    "error": "❌ Ошибка при обработке голоса. Попробуй текстом."
+                }
+    
+    # На случай если выше не сработало
+    return {
+        "amount": None,
+        "category": None,
+        "description": None,
+        "error": "⚠️ Не удалось обработать голос."
+    }
 
 def parse_text_to_transaction(text: str) -> dict:
     """
