@@ -38,6 +38,17 @@ class TransactionRead(TransactionBase):
     budget_spent: Optional[float] = None
     budget_percent: Optional[float] = None
 
+    # Кандидатные категории от ИИ (v2)
+    candidate_categories: Optional[List[str]] = None
+
+class CategoryFeedbackCreate(BaseModel):
+    telegram_id: int
+    transaction_id: int
+    original_category: Optional[str] = None
+    chosen_category: str
+    candidate_categories: Optional[List[str]] = None
+    original_text: Optional[str] = None
+
 # -----------------------
 # ОТЧЁТЫ
 # -----------------------
