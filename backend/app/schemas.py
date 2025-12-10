@@ -1,13 +1,10 @@
 from datetime import datetime
 from typing import Optional, List
-
 from pydantic import BaseModel
-
 
 # -----------------------
 # ТРАНЗАКЦИИ
 # -----------------------
-
 
 class TransactionBase(BaseModel):
     amount: float
@@ -15,7 +12,6 @@ class TransactionBase(BaseModel):
     description: Optional[str] = None
     category: Optional[str] = None
     date: Optional[datetime] = None
-
     # "expense" — расход, "income" — доход
     kind: str = "expense"
 
@@ -38,10 +34,10 @@ class TransactionRead(TransactionBase):
     budget_spent: Optional[float] = None
     budget_percent: Optional[float] = None
 
+
 # -----------------------
 # ОТЧЁТЫ
 # -----------------------
-
 
 class CategorySummary(BaseModel):
     category: Optional[str]
@@ -64,12 +60,12 @@ class BalanceReport(BaseModel):
     - доходы
     - итог (доходы - расходы)
     """
-
     days: int
     expenses_total: float
     incomes_total: float
     net: float
     currency: str
+
 
 class MemberExpenseSummary(BaseModel):
     """
@@ -90,6 +86,7 @@ class MembersReport(BaseModel):
     currency: str
     members: List[MemberExpenseSummary]
 
+
 class ShopSummary(BaseModel):
     merchant: str
     amount: float
@@ -103,10 +100,10 @@ class ShopsReport(BaseModel):
     currency: str
     shops: List[ShopSummary]
 
+
 # -----------------------
 # НАПОМИНАНИЯ
 # -----------------------
-
 
 class ReminderBase(BaseModel):
     title: str
@@ -135,7 +132,6 @@ class ReminderRead(ReminderBase):
 # ПОЛЬЗОВАТЕЛЬ И СЕМЬЯ
 # -----------------------
 
-
 class MemberShort(BaseModel):
     """Краткая информация об участнике семьи."""
     id: int
@@ -152,13 +148,11 @@ class MeResponse(BaseModel):
     user_id: int
     telegram_id: Optional[int] = None
     name: Optional[str] = None
-
     household_id: int
     household_name: str
     currency: str
     privacy_mode: str
     role: str  # роль текущего пользователя в семье
-
     members: List[MemberShort]
 
 
@@ -176,7 +170,7 @@ class HouseholdInfo(BaseModel):
 class HouseholdInvite(BaseModel):
     """
     Ответ для /household/invite
-    (пока просто числовой код = id семьи).
+    (код приглашения).
     """
     code: str
 
@@ -206,14 +200,13 @@ class UserSetNameRequest(BaseModel):
 # ПРОЧЕЕ
 # -----------------------
 
-
 class ParseTextRequest(BaseModel):
     text: str
+
 
 # -----------------------
 # КАТЕГОРИИ 2.0
 # -----------------------
-
 
 class CategoryBase(BaseModel):
     """
@@ -240,4 +233,4 @@ class CategoryRead(CategoryBase):
     id: int
 
     class Config:
-        orm_mode = True
+        from_attributes = True
