@@ -1,8 +1,8 @@
 """
-Команды для работы с категориями.
+Обработчики управления категориями (через inline кнопки)
 """
-from aiogram import types, Router
-from aiogram.filters import Command
+from aiogram import types, Router, F
+from aiogram.types import CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -36,45 +36,58 @@ class CatDeleteStates(StatesGroup):
 
 
 # ==========================================
-# /categories — список категорий
+# СПИСОК КАТЕГОРИЙ
 # ==========================================
 
-@router.message(Command("categories"))
-async def cmd_categories(message: types.Message):
-    """Показать список категорий семьи."""
-    telegram_id = message.from_user.id
+@router.callback_query(F.data == "cat_list")
+async def cat_list_callback(callback: CallbackQuery):
+    """Показать список категорий семьи"""
+    telegram_id = callback.from_user.id
+    
+    await callback.message.edit_text("⏳ Загружаю категории...")
     
     try:
         categories = await api.get_categories(telegram_id)
         
         if not categories:
-            await message.answer("📂 Категорий пока нет.\n\nИспользуй /cat_add чтобы создать.")
+            await callback.message.edit_text(
+                "📂 Категорий пока нет.\n\n"
+                "Нажми \"➕ Добавить\" чтобы создать."
+            )
+            await callback.answer()
             return
         
         text = "📂 <b>Категории:</b>\n\n"
         for cat in categories:
             text += f"• {cat['name']}\n"
         
-        await message.answer(text.strip(), parse_mode="HTML")
+        await callback.message.edit_text(text.strip(), parse_mode="HTML")
+        await callback.answer()
         
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await callback.message.edit_text(f"❌ Ошибка: {e}")
+        await callback.answer()
 
 
 # ==========================================
-# /cat_add — создать категорию
+# СОЗДАТЬ КАТЕГОРИЮ
 # ==========================================
 
-@router.message(Command("cat_add"))
-async def cmd_cat_add(message: types.Message, state: FSMContext):
-    """Начало создания категории."""
-    await message.answer("📝 Введи название новой категории:")
+@router.callback_query(F.data == "cat_add")
+async def cat_add_callback(callback: CallbackQuery, state: FSMContext):
+    """Начало создания категории"""
+    await callback.message.edit_text(
+        "📝 <b>Создание категории</b>\n\n"
+        "Введи название новой категории:",
+        parse_mode="HTML"
+    )
     await state.set_state(CatAddStates.waiting_for_name)
+    await callback.answer()
 
 
 @router.message(CatAddStates.waiting_for_name)
 async def process_cat_add(message: types.Message, state: FSMContext):
-    """Обработка создания категории."""
+    """Обработка создания категории"""
     name = message.text.strip()
     if not name:
         await message.answer("❌ Название не может быть пустым. Попробуй ещё раз:")
@@ -92,19 +105,24 @@ async def process_cat_add(message: types.Message, state: FSMContext):
 
 
 # ==========================================
-# /cat_rename — переименовать категорию
+# ПЕРЕИМЕНОВАТЬ КАТЕГОРИЮ
 # ==========================================
 
-@router.message(Command("cat_rename"))
-async def cmd_cat_rename(message: types.Message, state: FSMContext):
-    """Начало переименования категории."""
-    await message.answer("📝 Введи текущее название категории:")
+@router.callback_query(F.data == "cat_rename")
+async def cat_rename_callback(callback: CallbackQuery, state: FSMContext):
+    """Начало переименования категории"""
+    await callback.message.edit_text(
+        "✏️ <b>Переименование категории</b>\n\n"
+        "Введи текущее название категории:",
+        parse_mode="HTML"
+    )
     await state.set_state(CatRenameStates.waiting_for_old_name)
+    await callback.answer()
 
 
 @router.message(CatRenameStates.waiting_for_old_name)
 async def process_cat_rename_old(message: types.Message, state: FSMContext):
-    """Обработка старого названия."""
+    """Обработка старого названия"""
     old_name = message.text.strip()
     if not old_name:
         await message.answer("❌ Название не может быть пустым. Попробуй ещё раз:")
@@ -117,7 +135,7 @@ async def process_cat_rename_old(message: types.Message, state: FSMContext):
 
 @router.message(CatRenameStates.waiting_for_new_name)
 async def process_cat_rename_new(message: types.Message, state: FSMContext):
-    """Обработка нового названия и переименование."""
+    """Обработка нового названия и переименование"""
     new_name = message.text.strip()
     if not new_name:
         await message.answer("❌ Название не может быть пустым. Попробуй ещё раз:")
@@ -141,23 +159,24 @@ async def process_cat_rename_new(message: types.Message, state: FSMContext):
 
 
 # ==========================================
-# /cat_merge — объединить категории
+# ОБЪЕДИНИТЬ КАТЕГОРИИ
 # ==========================================
 
-@router.message(Command("cat_merge"))
-async def cmd_cat_merge(message: types.Message, state: FSMContext):
-    """Начало объединения категорий."""
-    await message.answer(
-        "🔀 Объединение категорий\n\n"
+@router.callback_query(F.data == "cat_merge")
+async def cat_merge_callback(callback: CallbackQuery, state: FSMContext):
+    """Начало объединения категорий"""
+    await callback.message.edit_text(
+        "🔀 <b>Объединение категорий</b>\n\n"
         "Введи название <b>исходной</b> категории (будет удалена):",
         parse_mode="HTML"
     )
     await state.set_state(CatMergeStates.waiting_for_source)
+    await callback.answer()
 
 
 @router.message(CatMergeStates.waiting_for_source)
 async def process_cat_merge_source(message: types.Message, state: FSMContext):
-    """Обработка исходной категории."""
+    """Обработка исходной категории"""
     source = message.text.strip()
     if not source:
         await message.answer("❌ Название не может быть пустым. Попробуй ещё раз:")
@@ -173,7 +192,7 @@ async def process_cat_merge_source(message: types.Message, state: FSMContext):
 
 @router.message(CatMergeStates.waiting_for_target)
 async def process_cat_merge_target(message: types.Message, state: FSMContext):
-    """Обработка целевой категории и объединение."""
+    """Обработка целевой категории и объединение"""
     target = message.text.strip()
     if not target:
         await message.answer("❌ Название не может быть пустым. Попробуй ещё раз:")
@@ -198,24 +217,26 @@ async def process_cat_merge_target(message: types.Message, state: FSMContext):
 
 
 # ==========================================
-# /cat_delete — удалить категорию
+# УДАЛИТЬ КАТЕГОРИЮ
 # ==========================================
 
-@router.message(Command("cat_delete"))
-async def cmd_cat_delete(message: types.Message, state: FSMContext):
-    """Начало удаления категории."""
-    await message.answer(
-        "🗑 Удаление категории\n\n"
+@router.callback_query(F.data == "cat_delete")
+async def cat_delete_callback(callback: CallbackQuery, state: FSMContext):
+    """Начало удаления категории"""
+    await callback.message.edit_text(
+        "🗑 <b>Удаление категории</b>\n\n"
         "⚠️ Можно удалить только пустую категорию (без операций).\n"
-        "Если есть операции — используй /cat_merge\n\n"
-        "Введи название категории:"
+        "Если есть операции — используй \"🔗 Объединить\"\n\n"
+        "Введи название категории:",
+        parse_mode="HTML"
     )
     await state.set_state(CatDeleteStates.waiting_for_name)
+    await callback.answer()
 
 
 @router.message(CatDeleteStates.waiting_for_name)
 async def process_cat_delete(message: types.Message, state: FSMContext):
-    """Обработка удаления категории."""
+    """Обработка удаления категории"""
     name = message.text.strip()
     if not name:
         await message.answer("❌ Название не может быть пустым. Попробуй ещё раз:")
