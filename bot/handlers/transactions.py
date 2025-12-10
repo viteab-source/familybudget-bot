@@ -11,6 +11,27 @@ from aiogram.fsm.state import State, StatesGroup
 from ..services.api_client import APIClient
 from ..config import API_BASE_URL, YANDEX_API_KEY
 
+
+
+async def log_category_feedback(telegram_id: int, selected_category: str, transaction_id: int = None):
+    """
+    Логирует выбор пользователя для обучения AI.
+    Отправляет данные на backend /api/categories/feedback
+    """
+    try:
+        url = f"{API_BASE_URL}/categories/feedback"
+        params = {"telegram_id": telegram_id}
+        payload = {
+            "transaction_id": transaction_id,
+            "user_selected_category": selected_category,
+        }
+        
+        async with httpx.AsyncClient() as client:
+            await client.post(url, params=params, json=payload, timeout=5.0)
+    except Exception:
+        # Тихо игнорируем ошибки логирования (не критично)
+        pass
+
 router = Router()
 api = APIClient(API_BASE_URL)
 
@@ -395,7 +416,8 @@ async def handle_category_change(callback: types.CallbackQuery, state: FSMContex
         await callback.message.edit_text(new_text, parse_mode="HTML", reply_markup=None)
         await callback.answer(f"✅ Категория: {category}")
         
-        # TODO: Логировать выбор для обучения (ШАГ 4)
+        # Логируем обратную связь для обучения
+        await log_category_feedback(telegram_id, category, tx.get("id"))
         
     except Exception as e:
         await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
@@ -418,7 +440,8 @@ async def process_custom_category(message: types.Message, state: FSMContext):
         text = "✅ Категория изменена:\n\n" + format_transaction(tx)
         await message.answer(text, parse_mode="HTML")
         
-        # TODO: Логировать выбор для обучения (ШАГ 4)
+        # Логируем обратную связь для обучения
+        await log_category_feedback(telegram_id, category, tx.get("id"))
         
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")

@@ -344,3 +344,63 @@ def delete_category(
     db.commit()
 
     return category
+
+
+
+@router.post("/feedback")
+def log_category_feedback(
+    body: dict,
+    telegram_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """
+    Логирование обратной связи по категориям (для обучения AI).
+    
+    Когда пользователь меняет категорию, предложенную AI,
+    мы сохраняем этот выбор для анализа и улучшения промптов.
+    
+    Пример:
+    POST /categories/feedback?telegram_id=123456789
+    Body: {
+        "transaction_id": 42,
+        "user_selected_category": "Продукты"
+    }
+    """
+    from .. import models
+    
+    user, household = get_or_create_user_and_household(db, telegram_id)
+    
+    transaction_id = body.get("transaction_id")
+    user_selected_category = body.get("user_selected_category", "").strip()
+    
+    if not user_selected_category:
+        raise HTTPException(status_code=400, detail="user_selected_category required")
+    
+    # Получаем транзакцию для извлечения данных
+    original_text = None
+    ai_category = None
+    
+    if transaction_id:
+        tx = db.query(models.Transaction).filter(
+            models.Transaction.id == transaction_id,
+            models.Transaction.household_id == household.id,
+        ).first()
+        
+        if tx:
+            original_text = tx.description
+            ai_category = tx.category
+    
+    # Создаём запись обратной связи
+    feedback = models.CategoryFeedback(
+        household_id=household.id,
+        user_id=user.id if user else None,
+        transaction_id=transaction_id,
+        original_text=original_text,
+        ai_category=ai_category,
+        user_selected_category=user_selected_category,
+    )
+    
+    db.add(feedback)
+    db.commit()
+    
+    return {"status": "ok", "message": "Feedback logged"}

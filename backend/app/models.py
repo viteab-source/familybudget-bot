@@ -235,3 +235,35 @@ class HouseholdInvite(Base):
 
     household = relationship("Household", back_populates="invites")
     created_by_user = relationship("User")
+
+
+
+class CategoryFeedback(Base):
+    """
+    Лог обратной связи по категориям.
+    Сохраняем когда пользователь исправляет категорию, предложенную AI.
+    Используется для обучения и улучшения промптов.
+    """
+    __tablename__ = "category_feedback"
+
+    id = Column(Integer, primary_key=True, index=True)
+    household_id = Column(Integer, ForeignKey("households.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    transaction_id = Column(Integer, ForeignKey("transactions.id"), nullable=True)
+    
+    # Исходный текст от пользователя
+    original_text = Column(Text, nullable=True)
+    
+    # Что предложил AI
+    ai_category = Column(String(100), nullable=True)
+    
+    # Что выбрал пользователь
+    user_selected_category = Column(String(100), nullable=False)
+    
+    # Метаданные
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    # Relationships
+    household = relationship("Household")
+    user = relationship("User")
+    transaction = relationship("Transaction")
