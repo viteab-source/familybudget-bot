@@ -285,6 +285,43 @@ async def process_aiadd(message: types.Message, state: FSMContext):
     await state.clear()
 
 
+
+# ==========================================
+# Обработка обычного текста (автоматический AI)
+# ==========================================
+
+@router.message(
+    F.text 
+    & ~F.text.startswith('/') 
+    & ~F.text.in_(['📊 Отчёты', '🔔 Напоминания', '⚙️ Настройки', '❓ Помощь'])
+)
+async def handle_plain_text(message: types.Message, state: FSMContext):
+    """
+    Обработка любого текста (не команды, не кнопки меню) через AI.
+    Это главная фича бота - "пиши как человеку"!
+    """
+    # Проверяем что не в FSM (иначе не перехватываем диалоги)
+    current_state = await state.get_state()
+    if current_state:
+        return
+    
+    text = message.text.strip()
+    telegram_id = message.from_user.id
+    
+    processing_msg = await message.answer("🤖 Обрабатываю...")
+    
+    try:
+        tx = await api.parse_and_create(telegram_id, text)
+        
+        await processing_msg.delete()
+        
+        result_text = "✅ Добавлено:\n\n" + format_transaction(tx)
+        await message.answer(result_text, parse_mode="HTML")
+        
+    except Exception as e:
+        await processing_msg.delete()
+        await message.answer(f"❌ Не удалось обработать. Попробуй:\n\"Магнит 500\" или \"Такси 350\"")
+
 # ==========================================
 # Голосовые сообщения (STT + ИИ)
 # ==========================================
