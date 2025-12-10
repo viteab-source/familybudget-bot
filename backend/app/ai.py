@@ -21,10 +21,12 @@ def get_model_uri() -> str:
 def parse_text_to_transaction(text: str) -> dict:
     """
     Вызывает YandexGPT, чтобы из произвольного текста сделать JSON транзакции.
+    
     Возвращает dict с ключами:
     - amount (float)
     - currency (str)
-    - category (str | None)
+    - category (str | None) - основная категория
+    - candidate_categories (list[str]) - топ-3 подходящих категории
     - description (str | None)
     - date (str в формате YYYY-MM-DD, если удалось определить)
     """
@@ -48,7 +50,8 @@ def parse_text_to_transaction(text: str) -> dict:
 {{
   "amount": число (в рублях или евро, без текста),
   "currency": "RUB" или "EUR",
-  "category": "строка категории на русском",
+  "category": "строка основной категории на русском",
+  "candidate_categories": ["категория1", "категория2", "категория3"],
   "description": "краткое описание магазина/расхода/дохода",
   "date": "YYYY-MM-DD"
 }}
@@ -97,10 +100,10 @@ def parse_text_to_transaction(text: str) -> dict:
 Если дату понять нельзя — используй текущую дату ({today_str}).
 
 =====================
-4. КАТЕГОРИЯ (category)
+4. КАТЕГОРИЯ (category) + КАНДИДАТЫ (candidate_categories)
 =====================
 
-Ты должен выбрать **ОДНУ** основную категорию из следующего списка (если ничего не подходит — используй "Другое"):
+СПИСОК ДОСТУПНЫХ КАТЕГОРИЙ:
 
 - "Продукты"
 - "Кафе и рестораны"
@@ -133,6 +136,26 @@ def parse_text_to_transaction(text: str) -> dict:
 - "Доход: проценты"
 - "Другое"
 
+ТЫ ДОЛЖЕН:
+1. Выбрать ОДНУ основную категорию → поле "category"
+2. Предложить ТОП-3 подходящих категории → поле "candidate_categories" (массив из 3 строк)
+
+ВАЖНО:
+- Первая категория в candidate_categories ДОЛЖНА совпадать с category
+- Следующие 2 категории — альтернативные варианты, которые тоже могут подойти
+
+Пример для "Магнит 500":
+{{
+  "category": "Продукты",
+  "candidate_categories": ["Продукты", "Химия и бытовое", "Другое"]
+}}
+
+Пример для "Кб пиво 690":
+{{
+  "category": "Алкоголь",
+  "candidate_categories": ["Алкоголь", "Продукты", "Другое"]
+}}
+
 ОБЩИЕ ПРАВИЛА:
 - Если текст явно про ребёнка: "игрушка для сына", "садик", "школа", "кружок" → чаще всего "Дети" или "Игрушки".
 - "корм для кота/кошки/собаки/питомца" → "Корма для животных" или "Животные".
@@ -158,9 +181,6 @@ def parse_text_to_transaction(text: str) -> dict:
   смотри на сам товар: "термобраш", "шампунь", "игрушка", "корм", "одежда" и т.д.
 - Fix Price и подобные — по смыслу товара (продукты, химия, игрушки и т.п.).
 
-Важно: сейчас ты возвращаешь ТОЛЬКО ОДНУ категорию на всё сообщение.  
-Когда в тексте много разных товаров (как в чеке), выбери **главную** категорию по смыслу, куда логичнее всего отнести расход.
-
 =====================
 5. ОПИСАНИЕ (description)
 =====================
@@ -179,6 +199,7 @@ def parse_text_to_transaction(text: str) -> dict:
 - amount — число (без строк).
 - currency — строка "RUB" или "EUR".
 - category — одна строка из списка выше (или "Другое").
+- candidate_categories — МАССИВ из ровно 3 строк (первая = category).
 - description — строка.
 - date — строка в формате "YYYY-MM-DD".
 """
@@ -188,7 +209,7 @@ def parse_text_to_transaction(text: str) -> dict:
         "completionOptions": {
             "stream": False,
             "temperature": 0.1,
-            "maxTokens": 300,
+            "maxTokens": 400,
         },
         "messages": [
             {"role": "system", "text": system_prompt},
@@ -213,8 +234,20 @@ def parse_text_to_transaction(text: str) -> dict:
     try:
         parsed = json.loads(raw_text)
     except json.JSONDecodeError:
-        # На всякий случай вычищаем возможные ```json и лишние пробелы
+        # На всякий случай вычищаем возможные ```
         cleaned = raw_text.strip().strip("```").strip()
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:].strip()
         parsed = json.loads(cleaned)
+
+    # Если GPT не вернул candidate_categories (обратная совместимость)
+    if "candidate_categories" not in parsed:
+        cat = parsed.get("category", "Другое")
+        parsed["candidate_categories"] = [cat, "Другое"]
+    
+    # Убедимся что первая категория = основной
+    if parsed.get("candidate_categories") and parsed.get("category"):
+        if parsed["candidate_categories"][0] != parsed["category"]:
+            parsed["candidate_categories"][0] = parsed["category"]
 
     return parsed
