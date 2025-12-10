@@ -11,6 +11,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from .config import BOT_TOKEN
 from .handlers import (
     base,
+    menu,
     user_family,
     transactions,
     categories,
@@ -18,6 +19,7 @@ from .handlers import (
     reports,
     reminders,
 )
+
 
 
 # ==========================================
@@ -48,6 +50,7 @@ def create_dispatcher() -> Dispatcher:
     
     # Подключаем все роутеры
     dp.include_router(base.router)
+    dp.include_router(menu.router)
     dp.include_router(user_family.router)
     dp.include_router(transactions.router)
     dp.include_router(categories.router)
