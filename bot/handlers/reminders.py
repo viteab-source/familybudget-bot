@@ -1,9 +1,9 @@
 """
-Команды для работы с напоминаниями.
+Обработчики напоминаний (через inline кнопки)
 """
 from datetime import datetime
-from aiogram import types, Router
-from aiogram.filters import Command
+from aiogram import types, Router, F
+from aiogram.types import CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -25,22 +25,116 @@ class RemindAddStates(StatesGroup):
 
 
 # ==========================================
-# /remind_add — создать напоминание
+# СПИСОК НАПОМИНАНИЙ
 # ==========================================
 
-@router.message(Command("remind_add"))
-async def cmd_remind_add(message: types.Message, state: FSMContext):
-    """Начало создания напоминания."""
-    await message.answer(
-        "🔔 Создание напоминания\n\n"
-        "Введи название (например: Коммуналка):"
+@router.callback_query(F.data == "remind_list")
+async def remind_list_callback(callback: CallbackQuery):
+    """Показать список активных напоминаний"""
+    telegram_id = callback.from_user.id
+    
+    await callback.message.edit_text("⏳ Загружаю напоминания...")
+    
+    try:
+        reminders = await api.list_reminders(telegram_id)
+        
+        if not reminders:
+            await callback.message.edit_text(
+                "🔔 Активных напоминаний нет.\n\n"
+                "Нажми \"➕ Добавить\" чтобы создать."
+            )
+            await callback.answer()
+            return
+        
+        text = "🔔 <b>Активные напоминания:</b>\n\n"
+        
+        for r in reminders:
+            title = r.get("title", "Без названия")
+            amount = r.get("amount")
+            interval = r.get("interval_days")
+            next_run = r.get("next_run_at")
+            
+            text += f"📝 <b>{title}</b>\n"
+            if amount:
+                text += f"💰 {amount:,.0f} RUB\n"
+            if interval:
+                text += f"📅 Каждые {interval} дн.\n"
+            if next_run:
+                try:
+                    dt = datetime.fromisoformat(next_run.replace("Z", "+00:00"))
+                    text += f"⏰ Следующее: {dt.strftime('%d.%m.%Y')}\n"
+                except:
+                    pass
+            text += "\n"
+        
+        await callback.message.edit_text(text.strip(), parse_mode="HTML")
+        await callback.answer()
+        
+    except Exception as e:
+        await callback.message.edit_text(f"❌ Ошибка: {e}")
+        await callback.answer()
+
+
+# ==========================================
+# НАПОМИНАНИЯ НА СЕГОДНЯ
+# ==========================================
+
+@router.callback_query(F.data == "remind_due")
+async def remind_due_callback(callback: CallbackQuery):
+    """Показать напоминания на сегодня"""
+    telegram_id = callback.from_user.id
+    
+    await callback.message.edit_text("⏳ Проверяю напоминания...")
+    
+    try:
+        reminders = await api.get_due_reminders(telegram_id)
+        
+        if not reminders:
+            await callback.message.edit_text("✅ На сегодня напоминаний нет!")
+            await callback.answer()
+            return
+        
+        text = "🔔 <b>Напоминания на сегодня:</b>\n\n"
+        
+        for r in reminders:
+            rid = r.get("id")
+            title = r.get("title", "Без названия")
+            amount = r.get("amount")
+            
+            text += f"📝 <b>{title}</b>\n"
+            if amount:
+                text += f"💰 {amount:,.0f} RUB\n"
+            text += f"ID: <code>{rid}</code>\n\n"
+        
+        text += "\n💡 Функция \"Отметить как оплаченное\" скоро будет добавлена"
+        
+        await callback.message.edit_text(text.strip(), parse_mode="HTML")
+        await callback.answer()
+        
+    except Exception as e:
+        await callback.message.edit_text(f"❌ Ошибка: {e}")
+        await callback.answer()
+
+
+# ==========================================
+# СОЗДАТЬ НАПОМИНАНИЕ
+# ==========================================
+
+@router.callback_query(F.data == "remind_add")
+async def remind_add_callback(callback: CallbackQuery, state: FSMContext):
+    """Начало создания напоминания"""
+    await callback.message.edit_text(
+        "🔔 <b>Создание напоминания</b>\n\n"
+        "Введи название (например: Коммуналка):",
+        parse_mode="HTML"
     )
     await state.set_state(RemindAddStates.waiting_for_title)
+    await callback.answer()
 
 
 @router.message(RemindAddStates.waiting_for_title)
 async def process_remind_title(message: types.Message, state: FSMContext):
-    """Обработка названия."""
+    """Обработка названия"""
     title = message.text.strip()
     if not title:
         await message.answer("❌ Название не может быть пустым. Попробуй ещё раз:")
@@ -53,7 +147,7 @@ async def process_remind_title(message: types.Message, state: FSMContext):
 
 @router.message(RemindAddStates.waiting_for_amount)
 async def process_remind_amount(message: types.Message, state: FSMContext):
-    """Обработка суммы."""
+    """Обработка суммы"""
     text = message.text.strip()
     
     amount = None
@@ -76,7 +170,7 @@ async def process_remind_amount(message: types.Message, state: FSMContext):
 
 @router.message(RemindAddStates.waiting_for_interval)
 async def process_remind_interval(message: types.Message, state: FSMContext):
-    """Обработка интервала и создание напоминания."""
+    """Обработка интервала и создание напоминания"""
     text = message.text.strip()
     
     interval_days = None
@@ -113,85 +207,3 @@ async def process_remind_interval(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Ошибка: {e}")
     
     await state.clear()
-
-
-# ==========================================
-# /remind_list — список напоминаний
-# ==========================================
-
-@router.message(Command("remind_list"))
-async def cmd_remind_list(message: types.Message):
-    """Показать список активных напоминаний."""
-    telegram_id = message.from_user.id
-    
-    try:
-        reminders = await api.list_reminders(telegram_id)
-        
-        if not reminders:
-            await message.answer(
-                "🔔 Активных напоминаний нет.\n\n"
-                "Используй /remind_add чтобы создать."
-            )
-            return
-        
-        text = "🔔 <b>Активные напоминания:</b>\n\n"
-        
-        for r in reminders:
-            title = r.get("title", "Без названия")
-            amount = r.get("amount")
-            interval = r.get("interval_days")
-            next_run = r.get("next_run_at")
-            
-            text += f"📝 <b>{title}</b>\n"
-            if amount:
-                text += f"💰 {amount:,.0f} RUB\n"
-            if interval:
-                text += f"📅 Каждые {interval} дн.\n"
-            if next_run:
-                try:
-                    dt = datetime.fromisoformat(next_run.replace("Z", "+00:00"))
-                    text += f"⏰ Следующее: {dt.strftime('%d.%m.%Y')}\n"
-                except:
-                    pass
-            text += "\n"
-        
-        await message.answer(text.strip(), parse_mode="HTML")
-        
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-
-
-# ==========================================
-# /remind_due — напоминания на сегодня
-# ==========================================
-
-@router.message(Command("remind_due"))
-async def cmd_remind_due(message: types.Message):
-    """Показать напоминания на сегодня."""
-    telegram_id = message.from_user.id
-    
-    try:
-        reminders = await api.get_due_reminders(telegram_id)
-        
-        if not reminders:
-            await message.answer("✅ На сегодня напоминаний нет!")
-            return
-        
-        text = "🔔 <b>Напоминания на сегодня:</b>\n\n"
-        
-        for r in reminders:
-            rid = r.get("id")
-            title = r.get("title", "Без названия")
-            amount = r.get("amount")
-            
-            text += f"📝 <b>{title}</b>\n"
-            if amount:
-                text += f"💰 {amount:,.0f} RUB\n"
-            text += f"ID: <code>{rid}</code>\n\n"
-        
-        text += "\n💡 Чтобы отметить как оплаченное, используй callback (пока не реализовано в handlers)"
-        
-        await message.answer(text.strip(), parse_mode="HTML")
-        
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
