@@ -459,6 +459,45 @@ def parse_and_create_transaction(
 
     return db_tx
 
+@router.post("/api/transactions/suggest-categories")
+async def suggest_categories_only(
+    body: schemas.ParseTextRequest,
+    telegram_id: int = Query(None),
+    db: Session = Depends(get_db)
+):
+    """Предложить категории БЕЗ создания транзакции для /aiadd"""
+    user, household = get_or_create_user_and_household(db, telegram_id)
+    
+    try:
+        parsed = parse_text_to_transaction(body.text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI parse error: {e}")
+    
+    amount = float(parsed.get('amount', 0))
+    if amount == 0:
+        raise HTTPException(status_code=400, detail="No amount detected")
+    
+    # Получаем существующие категории дома
+    existing_cats = db.query(models.Category).filter(
+        models.Category.household_id == household.id
+    ).all()
+    cat_names = [cat.name for cat in existing_cats]
+    
+    # AI предлагает из существующих + candidatecategories
+    suggestions = parsed.get('candidatecategories', [])
+    suggestions = [cat for cat in suggestions[:3] if cat in cat_names]  # Только существующие
+    
+    if not suggestions:
+        suggestions = [parsed.get('category', 'Еда')]  # Фоллбэк
+    
+    return {
+        "text": body.text,
+        "amount": amount,
+        "currency": parsed.get('currency', 'RUB'),
+        "suggestions": suggestions,
+        "confidence": 0.8  # TODO: реальная вероятность из YandexGPT
+    }
+
 @router.get("/export/csv")
 def export_transactions_csv(
     days: int = Query(30, ge=1, le=365),
