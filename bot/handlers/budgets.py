@@ -1,8 +1,8 @@
 """
-Команды для работы с бюджетами.
+Обработчики управления бюджетами (через inline кнопки)
 """
-from aiogram import types, Router
-from aiogram.filters import Command
+from aiogram import types, Router, F
+from aiogram.types import CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -23,19 +23,79 @@ class BudgetSetStates(StatesGroup):
 
 
 # ==========================================
-# /budget_set — установить лимит бюджета
+# СТАТУС БЮДЖЕТОВ
 # ==========================================
 
-@router.message(Command("budget_set"))
-async def cmd_budget_set(message: types.Message, state: FSMContext):
-    """Начало установки лимита бюджета."""
-    await message.answer("📊 Введи название категории для бюджета:")
+@router.callback_query(F.data == "budget_status")
+async def budget_status_callback(callback: CallbackQuery):
+    """Показать статус всех бюджетов"""
+    telegram_id = callback.from_user.id
+    
+    await callback.message.edit_text("⏳ Загружаю статус бюджетов...")
+    
+    try:
+        data = await api.get_budget_status(telegram_id)
+        
+        period = data.get("period", "")
+        budgets = data.get("budgets", [])
+        
+        if not budgets:
+            await callback.message.edit_text(
+                "📊 Бюджетов пока нет.\n\n"
+                "Нажми \"💵 Установить лимит\" чтобы создать."
+            )
+            await callback.answer()
+            return
+        
+        text = f"📊 <b>Статус бюджетов ({period})</b>\n\n"
+        
+        for b in budgets:
+            category = b.get("category", "Без названия")
+            limit = b.get("limit", 0)
+            spent = b.get("spent", 0)
+            percent = b.get("percent", 0)
+            currency = b.get("currency", "RUB")
+            
+            # Эмодзи в зависимости от процента
+            if percent >= 100:
+                emoji = "🔴"
+            elif percent >= 80:
+                emoji = "🟡"
+            else:
+                emoji = "🟢"
+            
+            text += (
+                f"{emoji} <b>{category}</b>\n"
+                f"Потрачено: {spent:,.0f} / {limit:,.0f} {currency} ({percent}%)\n\n"
+            )
+        
+        await callback.message.edit_text(text.strip(), parse_mode="HTML")
+        await callback.answer()
+        
+    except Exception as e:
+        await callback.message.edit_text(f"❌ Ошибка: {e}")
+        await callback.answer()
+
+
+# ==========================================
+# УСТАНОВИТЬ ЛИМИТ БЮДЖЕТА
+# ==========================================
+
+@router.callback_query(F.data == "budget_set")
+async def budget_set_callback(callback: CallbackQuery, state: FSMContext):
+    """Начало установки лимита бюджета"""
+    await callback.message.edit_text(
+        "💵 <b>Установить лимит бюджета</b>\n\n"
+        "Введи название категории для бюджета:",
+        parse_mode="HTML"
+    )
     await state.set_state(BudgetSetStates.waiting_for_category)
+    await callback.answer()
 
 
 @router.message(BudgetSetStates.waiting_for_category)
 async def process_budget_category(message: types.Message, state: FSMContext):
-    """Обработка категории."""
+    """Обработка категории"""
     category = message.text.strip()
     if not category:
         await message.answer("❌ Категория не может быть пустой. Попробуй ещё раз:")
@@ -48,7 +108,7 @@ async def process_budget_category(message: types.Message, state: FSMContext):
 
 @router.message(BudgetSetStates.waiting_for_amount)
 async def process_budget_amount(message: types.Message, state: FSMContext):
-    """Обработка суммы лимита и установка бюджета."""
+    """Обработка суммы лимита и установка бюджета"""
     try:
         amount = float(message.text.strip().replace(",", "."))
         if amount <= 0:
@@ -75,53 +135,3 @@ async def process_budget_amount(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Ошибка: {e}")
     
     await state.clear()
-
-
-# ==========================================
-# /budget_status — статус бюджетов
-# ==========================================
-
-@router.message(Command("budget_status"))
-async def cmd_budget_status(message: types.Message):
-    """Показать статус всех бюджетов."""
-    telegram_id = message.from_user.id
-    
-    try:
-        data = await api.get_budget_status(telegram_id)
-        
-        period = data.get("period", "")
-        budgets = data.get("budgets", [])
-        
-        if not budgets:
-            await message.answer(
-                "📊 Бюджетов пока нет.\n\n"
-                "Используй /budget_set чтобы установить лимиты по категориям."
-            )
-            return
-        
-        text = f"📊 <b>Статус бюджетов ({period})</b>\n\n"
-        
-        for b in budgets:
-            category = b.get("category", "Без названия")
-            limit = b.get("limit", 0)
-            spent = b.get("spent", 0)
-            percent = b.get("percent", 0)
-            currency = b.get("currency", "RUB")
-            
-            # Эмодзи в зависимости от процента
-            if percent >= 100:
-                emoji = "🔴"
-            elif percent >= 80:
-                emoji = "🟡"
-            else:
-                emoji = "🟢"
-            
-            text += (
-                f"{emoji} <b>{category}</b>\n"
-                f"Потрачено: {spent:,.0f} / {limit:,.0f} {currency} ({percent}%)\n\n"
-            )
-        
-        await message.answer(text.strip(), parse_mode="HTML")
-        
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
