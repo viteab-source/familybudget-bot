@@ -18,6 +18,16 @@ class APIClient:
     def __init__(self, base_url: str):
         self.base_url = base_url
 
+    async def set_last_transaction_category(self, telegram_id: int, category: str) -> dict:
+        """Изменить категорию последней транзакции"""
+        url = f"{self.base_url}/transactions/set-category-last"
+        params = {"telegram_id": telegram_id, "category": category}
+        
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, params=params, timeout=10.0)
+            resp.raise_for_status()
+            return resp.json()
+
     # ==========================================
     # ПОЛЬЗОВАТЕЛИ
     # ==========================================

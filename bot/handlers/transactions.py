@@ -316,11 +316,114 @@ async def handle_plain_text(message: types.Message, state: FSMContext):
         await processing_msg.delete()
         
         result_text = "✅ Добавлено:\n\n" + format_transaction(tx)
-        await message.answer(result_text, parse_mode="HTML")
+        
+        # Показываем inline кнопки с категориями
+        candidate_cats = tx.get("candidate_categories", [])
+        
+        if candidate_cats and len(candidate_cats) >= 2:
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            
+            # Первая категория (основная) - уже выбрана
+            main_cat = candidate_cats[0]
+            
+            # Альтернативные категории (2 и 3)
+            buttons = []
+            for cat in candidate_cats[1:]:
+                if cat != main_cat:
+                    buttons.append([
+                        InlineKeyboardButton(
+                            text=f"📂 {cat}",
+                            callback_data=f"setcat_{cat}"
+                        )
+                    ])
+            
+            # Кнопка "Другая категория"
+            buttons.append([
+                InlineKeyboardButton(
+                    text="✏️ Другая категория",
+                    callback_data="setcat_custom"
+                )
+            ])
+            
+            kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+            
+            result_text += f"\n\n💡 Верная категория <b>{main_cat}</b>?\nИли выбери другую:"
+            
+            await message.answer(result_text, parse_mode="HTML", reply_markup=kb)
+        else:
+            # Если нет кандидатов - просто показываем результат
+            await message.answer(result_text, parse_mode="HTML")
         
     except Exception as e:
         await processing_msg.delete()
         await message.answer(f"❌ Не удалось обработать. Попробуй:\n\"Магнит 500\" или \"Такси 350\"")
+
+
+
+# ==========================================
+# Обработчик смены категории (inline кнопки)
+# ==========================================
+
+class SetCategoryStates(StatesGroup):
+    waiting_for_custom_category = State()
+
+
+@router.callback_query(F.data.startswith("setcat_"))
+async def handle_category_change(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора категории через inline кнопки"""
+    data = callback.data.replace("setcat_", "")
+    telegram_id = callback.from_user.id
+    
+    if data == "custom":
+        # Пользователь хочет ввести свою категорию
+        await callback.message.edit_text(
+            "✏️ Введи название категории:",
+            reply_markup=None
+        )
+        await state.set_state(SetCategoryStates.waiting_for_custom_category)
+        await callback.answer()
+        return
+    
+    # Меняем категорию у последней транзакции
+    category = data
+    
+    try:
+        tx = await api.set_last_transaction_category(telegram_id, category)
+        
+        new_text = "✅ Категория изменена:\n\n" + format_transaction(tx)
+        
+        await callback.message.edit_text(new_text, parse_mode="HTML", reply_markup=None)
+        await callback.answer(f"✅ Категория: {category}")
+        
+        # TODO: Логировать выбор для обучения (ШАГ 4)
+        
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
+@router.message(SetCategoryStates.waiting_for_custom_category)
+async def process_custom_category(message: types.Message, state: FSMContext):
+    """Обработка ввода своей категории"""
+    category = message.text.strip()
+    
+    if not category:
+        await message.answer("❌ Категория не может быть пустой. Попробуй ещё раз:")
+        return
+    
+    telegram_id = message.from_user.id
+    
+    try:
+        tx = await api.set_last_transaction_category(telegram_id, category)
+        
+        text = "✅ Категория изменена:\n\n" + format_transaction(tx)
+        await message.answer(text, parse_mode="HTML")
+        
+        # TODO: Логировать выбор для обучения (ШАГ 4)
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+    
+    await state.clear()
 
 # ==========================================
 # Голосовые сообщения (STT + ИИ)
