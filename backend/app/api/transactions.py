@@ -459,7 +459,7 @@ def parse_and_create_transaction(
 
     return db_tx
 
-@router.post("/api/transactions/suggest-categories")
+@router.post("/transactions/suggest-categories")
 async def suggest_categories_only(
     body: schemas.ParseTextRequest,
     telegram_id: int = Query(None),
