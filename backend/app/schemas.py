@@ -33,7 +33,9 @@ class TransactionRead(TransactionBase):
     budget_limit: Optional[float] = None
     budget_spent: Optional[float] = None
     budget_percent: Optional[float] = None
-
+    
+    # Умные категории: топ-3 предложенных AI категории
+    candidate_categories: Optional[List[str]] = None
 
 # -----------------------
 # ОТЧЁТЫ

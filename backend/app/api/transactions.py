@@ -451,9 +451,13 @@ def parse_and_create_transaction(
 
     # Дополняем данными по бюджету
     attach_budget_info_to_tx(db, household, db_tx)
+    
+    # Добавляем candidate_categories из AI (для умных кнопок)
+    candidate_cats = parsed.get("candidate_categories", [])
+    # Используем setattr чтобы добавить поле в объект (не в БД)
+    db_tx.candidate_categories = candidate_cats
 
     return db_tx
-
 
 @router.get("/export/csv")
 def export_transactions_csv(
