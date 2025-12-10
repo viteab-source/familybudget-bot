@@ -1,16 +1,29 @@
-# backend/app/reset_db.py
+"""
+Скрипт для пересоздания базы данных (удаляет все таблицы).
+"""
+import sys
+import os
 
-from .db import Base, engine
-from . import models  # важно: чтобы все модели были импортированы
+# Добавляем путь к родительской папке для импорта
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.db import Base, engine
 
-def reset_db():
-    print("Dropping all tables...")
+def reset_database():
+    """Удаляет все таблицы и создаёт их заново."""
+    print("⚠️  Удаление всех таблиц...")
     Base.metadata.drop_all(bind=engine)
-    print("Creating all tables...")
+    print("✅ Таблицы удалены")
+    
+    print("📝 Создание таблиц...")
     Base.metadata.create_all(bind=engine)
-    print("Done.")
-
+    print("✅ Таблицы созданы")
+    
+    print("🎉 База данных пересоздана!")
 
 if __name__ == "__main__":
-    reset_db()
+    confirm = input("⚠️  Это удалит ВСЕ данные! Продолжить? (yes/no): ")
+    if confirm.lower() == "yes":
+        reset_database()
+    else:
+        print("❌ Отменено")

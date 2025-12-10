@@ -100,24 +100,24 @@ def health_check():
 # ==========================================
 
 # Пользователи
-app.include_router(users.router, tags=["Users"])
+app.include_router(users.router, prefix="/api", tags=["Users"])
 
 # Семьи
-app.include_router(households.router, tags=["Households"])
+app.include_router(households.router, prefix="/api", tags=["Households"])
 
 # Категории
-app.include_router(categories.router, prefix="/categories", tags=["Categories"])
+app.include_router(categories.router, prefix="/api/categories", tags=["Categories"])
 
 # Транзакции
-app.include_router(transactions.router, prefix="/transactions", tags=["Transactions"])
+app.include_router(transactions.router, prefix="/api/transactions", tags=["Transactions"])
 
 # Бюджеты
-app.include_router(budgets.router, prefix="/budget", tags=["Budgets"])
+app.include_router(budgets.router, prefix="/api/budget", tags=["Budgets"])
 
 # Отчёты
-app.include_router(reports.router, prefix="/report", tags=["Reports"])
+app.include_router(reports.router, prefix="/api/report", tags=["Reports"])
 
 # Напоминания
-app.include_router(reminders.router, prefix="/reminders", tags=["Reminders"])
+app.include_router(reminders.router, prefix="/api/reminders", tags=["Reminders"])
 
 logger.info("✅ All routers registered")
