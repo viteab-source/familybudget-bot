@@ -9,7 +9,6 @@ from sqlalchemy import (
     Numeric,
     String,
     BigInteger,
-    Text,
 )
 from sqlalchemy.orm import relationship
 
@@ -204,48 +203,6 @@ class CategoryBudget(Base):
 
     household = relationship("Household", backref="category_budgets")
     category = relationship("Category")
-
-class TransactionCategoryFeedback(Base):
-    """
-    Лог того, как пользователь исправлял категорию,
-    чтобы в будущем строить алиасы и улучшать ИИ.
-    """
-
-    __tablename__ = "transaction_category_feedback"
-
-    id = Column(Integer, primary_key=True, index=True)
-
-    household_id = Column(
-        Integer,
-        ForeignKey("households.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    user_id = Column(
-        Integer,
-        ForeignKey("users.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-    transaction_id = Column(
-        Integer,
-        ForeignKey("transactions.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-
-    # Что предложил ИИ
-    original_category = Column(String(50), nullable=True)
-    candidate_categories_json = Column(Text, nullable=True)
-
-    # Что в итоге выбрал человек
-    chosen_category = Column(String(50), nullable=False)
-
-    # Исходный текст сообщения (по которому разбирали расход)
-    original_text = Column(Text, nullable=True)
-
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    household = relationship("Household")
-    user = relationship("User")
-    transaction = relationship("Transaction")
 
 class HouseholdInvite(Base):
     """

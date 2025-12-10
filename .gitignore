@@ -1,11 +1,33 @@
-.env
-.idea/
-.vscode/
-# системные файлы macOS
-.DS_Store
-backend/.DS_Store
-
-# виртуальное окружение и мусор
-venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Переменные окружения (ВАЖНО - тут пароли!)
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Базы данных
+*.db
+*.sqlite
+
+# Логи
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
