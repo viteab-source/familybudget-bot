@@ -300,34 +300,43 @@ def edit_last_transaction(
     
     return tx
 
-
 @router.post("/set-category-last", response_model=schemas.TransactionRead)
 def set_last_transaction_category(
     category: str = Query(..., description="Новая категория"),
     telegram_id: int | None = Query(default=None),
+    force_new: bool = Query(
+        default=False,
+        description=(
+            "Если true — не искать похожие категории, "
+            "а создать новую категорию с таким именем"
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
     """
     Поменять категорию у последней транзакции пользователя.
-    
+
     Пример:
     POST /transactions/set-category-last?telegram_id=123456789&category=Продукты
     """
+    # 1. Находим пользователя и семью
     user, household = get_or_create_user_and_household(db, telegram_id)
-    
+
     if not user:
         raise HTTPException(
             status_code=400,
             detail="telegram_id is required",
         )
-    
+
+    # 2. Проверяем, что категория не пустая
     category = category.strip()
     if not category:
         raise HTTPException(
             status_code=400,
             detail="Категория не может быть пустой",
         )
-    
+
+    # 3. Берём последнюю транзакцию пользователя
     tx = (
         db.query(models.Transaction)
         .filter(
@@ -337,60 +346,37 @@ def set_last_transaction_category(
         .order_by(models.Transaction.created_at.desc())
         .first()
     )
-    
+
     if not tx:
         raise HTTPException(
             status_code=404,
             detail="У тебя нет транзакций",
         )
-    
-    # Ищем или создаём категорию с учётом опечаток
-    raw_name = category
 
-    # 1) Сначала пробуем найти точное совпадение
-    cat_obj = (
-        db.query(models.Category)
-        .filter(
-            models.Category.household_id == household.id,
-            models.Category.name == raw_name,
-        )
-        .first()
+    # 4. Разруливаем категорию с учётом опечаток
+    #    (тот же хелпер, что и в create_transaction)
+    cat_obj, _original_name, needs_confirmation = resolve_category_with_typos(
+        db=db,
+        household_id=household.id,
+        raw_name=category,
+        force_new=force_new,
     )
 
-    # 2) Если точного нет — ищем похожую категорию
-    if not cat_obj:
-        similar_name = find_similar_category(db, household.id, raw_name)
-        if similar_name:
-            cat_obj = (
-                db.query(models.Category)
-                .filter(
-                    models.Category.household_id == household.id,
-                    models.Category.name == similar_name,
-                )
-                .first()
-            )
-
-    # 3) Если ничего не нашли — создаём новую категорию
-    if not cat_obj:
-        cat_obj = models.Category(
-            household_id=household.id,
-            name=raw_name,
-        )
-        db.add(cat_obj)
-        db.commit()
-        db.refresh(cat_obj)
-
-    # Обновляем транзакцию
+    # 5. Обновляем транзакцию
     tx.category = cat_obj.name
     tx.category_id = cat_obj.id
 
-    
     db.commit()
     db.refresh(tx)
-    
-    # Дополняем данными по бюджету
+
+    # 6. Дополняем данными по бюджету
     attach_budget_info_to_tx(db, household, tx)
-    
+
+    # 7. Навешиваем технические поля для ответа
+    tx.raw_category = category                  # что ввёл пользователь
+    tx.suggested_category = cat_obj.name        # на что исправили
+    tx.needs_confirmation = needs_confirmation  # нужно ли спрашивать подтверждение
+
     return tx
 
 @router.post("/parse-and-create", response_model=schemas.TransactionRead)
