@@ -359,116 +359,127 @@ def set_last_transaction_category(
     
     return tx
 
-
 @router.post("/parse-and-create", response_model=schemas.TransactionRead)
 def parse_and_create_transaction(
-    body: schemas.ParseTextRequest,
+    body: schemas.ParseAndCreateRequest,
     telegram_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """
-    Разбор свободного текста через YandexGPT + создание транзакции (расход).
-    
-    Пример:
-    POST /transactions/parse-and-create?telegram_id=123456789
-    Body: {"text": "Перекрёсток продукты 2435₽ вчера"}
-    
-    ИИ извлечёт:
-    - amount: 2435
-    - category: "Продукты"
-    - description: "Перекрёсток"
-    - date: вчера
+    Разобрать текст через YandexGPT, применить локальные переопределения категорий
+    и создать транзакцию.
     """
+    import re
+
     user, household = get_or_create_user_and_household(db, telegram_id)
-    
-    # Вызываем ИИ для разбора текста
-    try:
-        parsed = parse_text_to_transaction(body.text)
-        logger.debug(f"AI parsed result: {parsed}")
-    except Exception as e:
-        logger.error(f"AI parse error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Ошибка разбора текста через ИИ: {e}",
+    if not user:
+        raise HTTPException(status_code=400, detail="telegram_id is required")
+
+    raw_text = body.text.strip()
+    if not raw_text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    # --- 1. Нормализуем паттерн для поиска override ---
+    normalized_pattern = raw_text.lower()
+    normalized_pattern = re.sub(r"[0-9₽$€.,:/-]+", " ", normalized_pattern)
+    normalized_pattern = re.sub(r"\s+", " ", normalized_pattern).strip()
+
+    override = (
+        db.query(models.CategoryOverride)
+        .filter(
+            models.CategoryOverride.household_id == household.id,
+            models.CategoryOverride.user_id == user.id,
+            models.CategoryOverride.normalized_pattern == normalized_pattern,
+            models.CategoryOverride.counter >= 2,
         )
-    
-    # Нормализуем сумму
-    amount = float(parsed.get("amount", 0))
-    if amount <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="ИИ не смог определить сумму",
-        )
-    
-    currency = parsed.get("currency", "RUB")
-    category_name = parsed.get("category")
-    description = parsed.get("description")
-    
-    # Дата
-    date_str = parsed.get("date")
-    tx_date = datetime.utcnow()
-    if date_str:
-        try:
-            tx_date = datetime.fromisoformat(date_str)
-        except ValueError:
-            pass
-    
-    # Ищем или создаём категорию
+        .order_by(models.CategoryOverride.counter.desc())
+        .first()
+    )
+
+    # --- 2. Вызываем YandexGPT ---
+    parsed = parse_text_to_transaction(raw_text)
+
+    amount = parsed.get("amount")
+    if not amount or amount <= 0:
+        raise HTTPException(status_code=400, detail="Не удалось определить сумму")
+
+    description = parsed.get("description") or raw_text
+    ai_category = parsed.get("category") or "Другое"
+    candidate_categories: list[str] = parsed.get("candidate_categories") or [ai_category, "Другое"]
+
+    # --- 3. Применяем локальный override категории ---
+    final_category = ai_category
+    if override:
+        final_category = override.category
+
+        # ставим override категорией №1 в candidatах
+        normalized_candidates = [c.strip() for c in candidate_categories if c.strip()]
+        if final_category not in normalized_candidates:
+            candidate_categories.insert(0, final_category)
+        else:
+            # поднимаем её наверх
+            candidate_categories = [final_category] + [
+                c for c in normalized_candidates if c != final_category
+            ]
+
+    # нормализуем регистр для хранения
+    final_category = final_category.strip().title()
+    candidate_categories = [c.strip().title() for c in candidate_categories]
+
+    # --- 4. Ищем/создаём Category ---
     category_id = None
-    if category_name:
-        cat_name = category_name.strip()
+    if final_category:
         category = (
             db.query(models.Category)
             .filter(
                 models.Category.household_id == household.id,
-                models.Category.name == cat_name,
+                models.Category.name.ilike(final_category),
             )
             .first()
         )
-        
         if not category:
-            category = models.Category(
-                household_id=household.id,
-                name=cat_name,
-            )
+            category = models.Category(household_id=household.id, name=final_category)
             db.add(category)
             db.commit()
             db.refresh(category)
-        
         category_id = category.id
-    
-    # Определяем merchant
-    # Объединяем description + category + исходный текст для поиска
-    combined_text = f"{description} {category_name} {body.text}"
-    merchant = extract_merchant_from_text(combined_text)
-    
-    # Создаём транзакцию
+
+    # --- 5. Дата операции ---
+    # parsed["date"] приходит как YYYY-MM-DD, если получилось распарсить
+    parsed_date = parsed.get("date")
+    if parsed_date:
+        try:
+            tx_date = datetime.strptime(parsed_date, "%Y-%m-%d")
+        except ValueError:
+            tx_date = datetime.utcnow()
+    else:
+        tx_date = datetime.utcnow()
+
+    merchant = extract_merchant_from_text(description)
+
     db_tx = models.Transaction(
         household_id=household.id,
-        user_id=user.id if user else None,
+        user_id=user.id,
         amount=amount,
-        currency=currency,
+        currency=parsed.get("currency") or household.currency,
         description=description,
-        category=category_name,
+        category=final_category,
         category_id=category_id,
         merchant=merchant,
         kind="expense",
         date=tx_date,
     )
+
     db.add(db_tx)
     db.commit()
     db.refresh(db_tx)
-    
-    # Дополняем данными по бюджету
-    attach_budget_info_to_tx(db, household, db_tx)
-    
-    # Добавляем candidate_categories из AI (для умных кнопок)
-    candidate_cats = parsed.get("candidate_categories", [])
-    # Используем setattr чтобы добавить поле в объект (не в БД)
-    db_tx.candidate_categories = candidate_cats
-    
-    return db_tx
 
+    # приклеиваем candidate_categories в атрибут, чтобы отдать в API
+    db_tx.candidate_categories = candidate_categories  # type: ignore[attr-defined]
+
+    attach_budget_info_to_tx(db, household, db_tx)
+
+    return db_tx
 
 @router.post("/suggest-categories", response_model=schemas.SuggestCategoriesResponse)
 async def suggest_categories_only(

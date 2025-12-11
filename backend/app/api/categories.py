@@ -398,8 +398,45 @@ def log_category_feedback(
         ai_category=ai_category,
         user_selected_category=user_selected_category,
     )
-    
     db.add(feedback)
+
+    # --- Локальная "память" категорий ---
+    # Берём описание как паттерн
+    pattern_source = (original_text or "").strip()
+    if pattern_source:
+        # Простейшая нормализация: lower + убираем цифры и символы валют
+        import re
+
+        normalized_pattern = pattern_source.lower()
+        normalized_pattern = re.sub(r"[0-9₽$€.,:/-]+", " ", normalized_pattern)
+        normalized_pattern = re.sub(r"\s+", " ", normalized_pattern).strip()
+
+        # Нормализуем категорию (регистр)
+        normalized_category = user_selected_category.strip().title()
+
+        override = (
+            db.query(models.CategoryOverride)
+            .filter(
+                models.CategoryOverride.household_id == household.id,
+                models.CategoryOverride.user_id == (user.id if user else None),
+                models.CategoryOverride.normalized_pattern == normalized_pattern,
+                models.CategoryOverride.category == normalized_category,
+            )
+            .first()
+        )
+
+        if override:
+            override.counter += 1
+        else:
+            override = models.CategoryOverride(
+                household_id=household.id,
+                user_id=user.id if user else None,
+                normalized_pattern=normalized_pattern,
+                category=normalized_category,
+                counter=1,
+            )
+            db.add(override)
+
     db.commit()
-    
+
     return {"status": "ok", "message": "Feedback logged"}

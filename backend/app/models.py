@@ -270,3 +270,31 @@ class CategoryFeedback(Base):
     household = relationship("Household")
     user = relationship("User")
     transaction = relationship("Transaction")
+
+class CategoryOverride(Base):
+    """
+    Локальная «память» категорий по тексту операции.
+
+    Хранит, какую категорию пользователь обычно выбирает
+    для похожих описаний.
+    """
+    __tablename__ = "category_overrides"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    household_id = Column(Integer, ForeignKey("households.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+
+    # Нормализованный паттерн описания (lower, без чисел/дат)
+    normalized_pattern = Column(String(255), nullable=False, index=True)
+
+    # Итоговая категория (как строка, после нормализации)
+    category = Column(String(100), nullable=False)
+
+    # Сколько раз пользователь выбирал эту категорию для этого паттерна
+    counter = Column(Integer, nullable=False, default=1)
+
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    household = relationship("Household")
+    user = relationship("User")

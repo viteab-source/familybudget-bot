@@ -267,3 +267,11 @@ class StatusResponse(BaseModel):
     """
     status: str
     message: Optional[str] = None
+
+from pydantic import BaseModel
+
+class ParseAndCreateRequest(BaseModel):
+    """
+    Запрос для /transactions/parse-and-create.
+    """
+    text: str

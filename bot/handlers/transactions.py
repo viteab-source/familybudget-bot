@@ -1,7 +1,9 @@
 """
 Команды для работы с транзакциями (расходы/доходы).
 """
+
 import os
+
 import httpx
 from aiogram import types, Router, F
 from aiogram.filters import Command
@@ -11,26 +13,23 @@ from aiogram.fsm.state import State, StatesGroup
 from ..services.api_client import APIClient
 from ..config import API_BASE_URL, YANDEX_API_KEY
 
-
-
 async def log_category_feedback(telegram_id: int, selected_category: str, transaction_id: int = None):
     """
     Логирует выбор пользователя для обучения AI.
     Отправляет данные на backend /api/categories/feedback
     """
     try:
-        url = f"{API_BASE_URL}/api/categories/feedback"
+        url = f"{API_BASE_URL}/categories/feedback"
         params = {"telegram_id": telegram_id}
         payload = {
             "transaction_id": transaction_id,
             "user_selected_category": selected_category,
         }
-        
         async with httpx.AsyncClient() as client:
             await client.post(url, params=params, json=payload, timeout=5.0)
     except Exception:
         # Тихо игнорируем ошибки логирования (не критично)
-        pass
+        pass    
 
 router = Router()
 api = APIClient(API_BASE_URL)
@@ -59,9 +58,15 @@ class EditLastStates(StatesGroup):
     waiting_for_new_value = State()
 
 
+class SetCategoryStates(StatesGroup):
+    waiting_for_custom_category = State()
+
+
 # ==========================================
 # Вспомогательные функции
 # ==========================================
+
+from datetime import datetime  # Вверху файла, рядом с остальными import
 
 def format_transaction(tx: dict) -> str:
     """Форматирует транзакцию для вывода пользователю."""
@@ -70,25 +75,33 @@ def format_transaction(tx: dict) -> str:
     currency = tx.get("currency", "RUB")
     description = tx.get("description") or "—"
     category = tx.get("category") or "Без категории"
-    
+
     text = f"{kind_emoji} <b>{amount:,.0f} {currency}</b>\n"
     text += f"Описание: {description}\n"
     text += f"Категория: {category}"
-    
+
+    # Дата операции
+    date_str = tx.get("date") or tx.get("created_at")
+    if date_str:
+        try:
+            dt = datetime.fromisoformat(date_str)
+            text += f"\nДата: {dt:%d.%m.%Y}"
+        except Exception:
+            # Если формат неожиданный, просто игнорируем
+            pass
+
     # Если есть данные по бюджету
     if tx.get("budget_limit"):
         limit = tx.get("budget_limit")
         spent = tx.get("budget_spent")
         percent = tx.get("budget_percent")
         text += f"\n\n💰 Бюджет: {spent:,.0f} / {limit:,.0f} ({percent}%)"
-        
         if percent >= 100:
             text += " ⚠️ Превышен!"
         elif percent >= 80:
             text += " ⚡️"
-    
-    return text
 
+    return text
 
 async def transcribe_voice(file_path: str) -> str:
     """
@@ -96,24 +109,24 @@ async def transcribe_voice(file_path: str) -> str:
     """
     if not YANDEX_API_KEY:
         raise RuntimeError("YANDEX_API_KEY не настроен")
-    
+
     url = "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize"
     headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
-    
+
     with open(file_path, "rb") as f:
         data = f.read()
-    
+
     params = {
         "lang": "ru-RU",
         "format": "oggopus",
         "sampleRateHertz": 48000,
     }
-    
+
     async with httpx.AsyncClient() as client:
         resp = await client.post(url, headers=headers, params=params, content=data, timeout=30.0)
         resp.raise_for_status()
         result = resp.json()
-    
+
     return result.get("result", "")
 
 
@@ -138,7 +151,7 @@ async def process_add_amount(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введи корректную сумму (например: 1500):")
         return
-    
+
     await state.update_data(amount=amount)
     await message.answer("📝 Введи описание (или отправь '-' чтобы пропустить):")
     await state.set_state(AddTransactionStates.waiting_for_description)
@@ -150,7 +163,7 @@ async def process_add_description(message: types.Message, state: FSMContext):
     description = message.text.strip()
     if description == "-":
         description = None
-    
+
     await state.update_data(description=description)
     await message.answer("🏷 Введи категорию (или '-' чтобы пропустить):")
     await state.set_state(AddTransactionStates.waiting_for_category)
@@ -162,13 +175,13 @@ async def process_add_category(message: types.Message, state: FSMContext):
     category = message.text.strip()
     if category == "-":
         category = None
-    
+
     data = await state.get_data()
     amount = data["amount"]
     description = data.get("description")
-    
+
     telegram_id = message.from_user.id
-    
+
     try:
         tx = await api.create_transaction(
             telegram_id=telegram_id,
@@ -177,13 +190,11 @@ async def process_add_category(message: types.Message, state: FSMContext):
             category=category,
             kind="expense",
         )
-        
         text = "✅ Расход добавлен:\n\n" + format_transaction(tx)
         await message.answer(text, parse_mode="HTML")
-        
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
-    
+
     await state.clear()
 
 
@@ -208,7 +219,7 @@ async def process_income_amount(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введи корректную сумму (например: 50000):")
         return
-    
+
     await state.update_data(amount=amount)
     await message.answer("📝 Введи описание (или '-' чтобы пропустить):")
     await state.set_state(AddIncomeStates.waiting_for_description)
@@ -220,12 +231,11 @@ async def process_income_description(message: types.Message, state: FSMContext):
     description = message.text.strip()
     if description == "-":
         description = None
-    
+
     data = await state.get_data()
     amount = data["amount"]
-    
     telegram_id = message.from_user.id
-    
+
     try:
         tx = await api.create_transaction(
             telegram_id=telegram_id,
@@ -234,13 +244,11 @@ async def process_income_description(message: types.Message, state: FSMContext):
             category="Доход",
             kind="income",
         )
-        
         text = "✅ Доход добавлен:\n\n" + format_transaction(tx)
         await message.answer(text, parse_mode="HTML")
-        
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
-    
+
     await state.clear()
 
 
@@ -260,6 +268,59 @@ async def cmd_aiadd(message: types.Message, state: FSMContext):
     )
     await state.set_state(AIAddStates.waiting_for_text)
 
+# ==========================================
+# Обработчик смены категории (inline кнопки)
+# ==========================================
+
+@router.callback_query(F.data.startswith("setcat_"))
+async def handle_category_change(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора категории через inline кнопки"""
+    data = callback.data.replace("setcat_", "")
+    telegram_id = callback.from_user.id
+
+    if data == "custom":
+        await callback.message.edit_text("✏️ Введи название категории:", reply_markup=None)
+        await state.set_state(SetCategoryStates.waiting_for_custom_category)
+        await callback.answer()
+        return
+
+    category = data
+
+    try:
+        tx = await api.set_last_transaction_category(telegram_id, category)
+        new_text = "✅ Категория изменена:\n\n" + format_transaction(tx)
+        await callback.message.edit_text(new_text, parse_mode="HTML", reply_markup=None)
+        await callback.answer(f"✅ Категория: {category}")
+        await log_category_feedback(telegram_id, category, tx.get("id"))
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+@router.message(SetCategoryStates.waiting_for_custom_category)
+async def process_custom_category(message: types.Message, state: FSMContext):
+    """Обработка ввода своей категории"""
+    category = message.text.strip()
+
+    if not category:
+        await message.answer("❌ Категория не может быть пустой. Попробуй ещё раз:")
+        return
+
+    telegram_id = message.from_user.id
+
+    try:
+        # Меняем категорию у последней транзакции
+        tx = await api.set_last_transaction_category(telegram_id, category)
+
+        # Явное подтверждение пользователю
+        text = "✅ Категория изменена:\n\n" + format_transaction(tx)
+        await message.answer(text, parse_mode="HTML")
+
+        # Логируем выбор для обучения AI
+        await log_category_feedback(telegram_id, category, tx.get("id"))
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+    finally:
+        # Всегда выходим из FSM, чтобы дальше обычный текст шёл в ИИ
+        await state.clear()
 
 @router.message(AIAddStates.waiting_for_text)
 async def process_aiadd(message: types.Message, state: FSMContext):
@@ -268,57 +329,60 @@ async def process_aiadd(message: types.Message, state: FSMContext):
     if not text:
         await message.answer("❌ Текст не может быть пустым. Попробуй ещё раз:")
         return
-    
+
     telegram_id = message.from_user.id
-    
     processing_msg = await message.answer("🤖 Обрабатываю через ИИ...")
-    
+
     try:
         tx = await api.parse_and_create(telegram_id, text)
-        
         await processing_msg.delete()
-        
+
         result_text = "✅ Расход добавлен (ИИ):\n\n" + format_transaction(tx)
 
-        # Показываем inline кнопки с альтернативными категориями от AI
         selected_category = tx.get("category", "Без категории")
         candidate_cats = tx.get("candidate_categories", [])
 
         if candidate_cats:
             from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            
+
             buttons = []
-            # Показываем топ-3 категории от AI (исключая уже выбранную)
+
+            # Кнопка с текущей категорией
+            buttons.append([
+                InlineKeyboardButton(
+                    text=f"✅ {selected_category}",
+                    callback_data=f"setcat_{selected_category}",
+                )
+            ])
+
+            # Альтернативы от AI
             for cat in candidate_cats:
                 if cat != selected_category:
                     buttons.append([
                         InlineKeyboardButton(
                             text=f"📂 {cat}",
-                            callback_data=f"setcat_{cat}"
+                            callback_data=f"setcat_{cat}",
                         )
                     ])
-            
+
             # Кнопка "Другая категория"
             buttons.append([
                 InlineKeyboardButton(
                     text="✏️ Другая категория",
-                    callback_data="setcat_custom"
+                    callback_data="setcat_custom",
                 )
             ])
-            
+
             kb = InlineKeyboardMarkup(inline_keyboard=buttons)
             result_text += f"\n\n💡 Категория: {selected_category}\nИли выбери другую:"
             await message.answer(result_text, parse_mode="HTML", reply_markup=kb)
         else:
-            # Если нет альтернатив - просто показываем результат
             await message.answer(result_text, parse_mode="HTML")
-     
     except Exception as e:
         await processing_msg.delete()
         await message.answer(f"❌ Ошибка: {e}")
-    
-    await state.clear()
 
+    await state.clear()
 
 
 # ==========================================
@@ -326,131 +390,71 @@ async def process_aiadd(message: types.Message, state: FSMContext):
 # ==========================================
 
 @router.message(
-    F.text 
-    & ~F.text.startswith('/') 
-    & ~F.text.in_(['📊 Отчёты', '🔔 Напоминания', '⚙️ Настройки', '❓ Помощь'])
+    F.text
+    & ~F.text.startswith("/")
+    & ~F.text.in_(["📊 Отчёты", "🔔 Напоминания", "⚙️ Настройки", "❓ Помощь"])
 )
 async def handle_plain_text(message: types.Message, state: FSMContext):
     """
     Обработка любого текста (не команды, не кнопки меню) через AI.
-    Это главная фича бота - "пиши как человеку"!
     """
-    # Проверяем что не в FSM (иначе не перехватываем диалоги)
     current_state = await state.get_state()
     if current_state:
         return
-    
+
     text = message.text.strip()
     telegram_id = message.from_user.id
-    
     processing_msg = await message.answer("🤖 Обрабатываю...")
-    
+
     try:
         tx = await api.parse_and_create(telegram_id, text)
-        
         await processing_msg.delete()
-        
+
         result_text = "✅ Добавлено:\n\n" + format_transaction(tx)
-        
-        # Показываем кнопки с альтернативными категориями от AI
+
         selected_category = tx.get("category", "Без категории")
         candidate_cats = tx.get("candidate_categories", [])
 
         if candidate_cats:
             from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            
+
             buttons = []
-            # Показываем топ-3 категории от AI (исключая уже выбранную)
+
+            # Кнопка с текущей категорией
+            buttons.append([
+                InlineKeyboardButton(
+                    text=f"✅ {selected_category}",
+                    callback_data=f"setcat_{selected_category}",
+                )
+            ])
+
+            # Альтернативы от AI
             for cat in candidate_cats:
                 if cat != selected_category:
                     buttons.append([
                         InlineKeyboardButton(
                             text=f"📂 {cat}",
-                            callback_data=f"setcat_{cat}"
+                            callback_data=f"setcat_{cat}",
                         )
                     ])
-            
+
             # Кнопка "Другая категория"
             buttons.append([
                 InlineKeyboardButton(
                     text="✏️ Другая категория",
-                    callback_data="setcat_custom"
+                    callback_data="setcat_custom",
                 )
             ])
-            
+
             kb = InlineKeyboardMarkup(inline_keyboard=buttons)
             result_text += f"\n\n💡 Категория: {selected_category}\nИли выбери другую:"
             await message.answer(result_text, parse_mode="HTML", reply_markup=kb)
         else:
-            # Если нет альтернатив - просто показываем результат
             await message.answer(result_text, parse_mode="HTML")
+    except Exception:
+        await processing_msg.delete()
+        await message.answer("❌ Не удалось обработать. Попробуй:\n\"Магнит 500\" или \"Такси 350\"")
 
-# ==========================================
-# Обработчик смены категории (inline кнопки)
-# ==========================================
-
-class SetCategoryStates(StatesGroup):
-    waiting_for_custom_category = State()
-
-
-@router.callback_query(F.data.startswith("setcat_"))
-async def handle_category_change(callback: types.CallbackQuery, state: FSMContext):
-    """Обработка выбора категории через inline кнопки"""
-    data = callback.data.replace("setcat_", "")
-    telegram_id = callback.from_user.id
-    
-    if data == "custom":
-        # Пользователь хочет ввести свою категорию
-        await callback.message.edit_text(
-            "✏️ Введи название категории:",
-            reply_markup=None
-        )
-        await state.set_state(SetCategoryStates.waiting_for_custom_category)
-        await callback.answer()
-        return
-    
-    # Меняем категорию у последней транзакции
-    category = data
-    
-    try:
-        tx = await api.set_last_transaction_category(telegram_id, category)
-        
-        new_text = "✅ Категория изменена:\n\n" + format_transaction(tx)
-        
-        await callback.message.edit_text(new_text, parse_mode="HTML", reply_markup=None)
-        await callback.answer(f"✅ Категория: {category}")
-        
-        # Логируем обратную связь для обучения
-        await log_category_feedback(telegram_id, category, tx.get("id"))
-        
-    except Exception as e:
-        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
-
-
-@router.message(SetCategoryStates.waiting_for_custom_category)
-async def process_custom_category(message: types.Message, state: FSMContext):
-    """Обработка ввода своей категории"""
-    category = message.text.strip()
-    
-    if not category:
-        await message.answer("❌ Категория не может быть пустой. Попробуй ещё раз:")
-        return
-    
-    telegram_id = message.from_user.id
-    
-    try:
-        tx = await api.set_last_transaction_category(telegram_id, category)
-        
-        text = "✅ Категория изменена:\n\n" + format_transaction(tx)
-        await message.answer(text, parse_mode="HTML")
-        
-        # Логируем обратную связь для обучения
-        await log_category_feedback(telegram_id, category, tx.get("id"))
-        
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-    
-    await state.clear()
 
 # ==========================================
 # Голосовые сообщения (STT + ИИ)
@@ -460,39 +464,32 @@ async def process_custom_category(message: types.Message, state: FSMContext):
 async def handle_voice(message: types.Message):
     """Обработка голосового сообщения."""
     telegram_id = message.from_user.id
-    
     processing_msg = await message.answer("🎤 Распознаю голос...")
-    
+
     try:
-        # Скачиваем файл
         file_id = message.voice.file_id
         file = await message.bot.get_file(file_id)
         file_path = file.file_path
-        
-        # Скачиваем локально
+
         local_path = f"/tmp/voice_{telegram_id}_{file_id}.ogg"
         await message.bot.download_file(file_path, local_path)
-        
-        # Распознаём текст
+
         text = await transcribe_voice(local_path)
-        
-        # Удаляем файл
         os.remove(local_path)
-        
+
         if not text:
             await processing_msg.edit_text("❌ Не удалось распознать голос. Попробуй ещё раз.")
             return
-        
-        await processing_msg.edit_text(f"📝 Распознано: <i>{text}</i>\n\n🤖 Обрабатываю...", parse_mode="HTML")
-        
-        # Создаём транзакцию через ИИ
+
+        await processing_msg.edit_text(
+            f"📝 Распознано: <i>{text}</i>\n\n🤖 Обрабатываю...", parse_mode="HTML"
+        )
+
         tx = await api.parse_and_create(telegram_id, text)
-        
         await processing_msg.delete()
-        
+
         result_text = "✅ Расход добавлен (голос + ИИ):\n\n" + format_transaction(tx)
         await message.answer(result_text, parse_mode="HTML")
-        
     except Exception as e:
         await processing_msg.delete()
         await message.answer(f"❌ Ошибка: {e}")
@@ -506,7 +503,7 @@ async def handle_voice(message: types.Message):
 async def cmd_last(message: types.Message):
     """Показать последнюю транзакцию."""
     telegram_id = message.from_user.id
-    
+
     try:
         tx = await api.get_last_transaction(telegram_id)
         text = "📋 Последняя операция:\n\n" + format_transaction(tx)
@@ -523,7 +520,7 @@ async def cmd_last(message: types.Message):
 async def cmd_delete_last(message: types.Message):
     """Удалить последнюю транзакцию."""
     telegram_id = message.from_user.id
-    
+
     try:
         tx = await api.delete_last_transaction(telegram_id)
         text = "🗑 Удалена последняя операция:\n\n" + format_transaction(tx)
@@ -553,35 +550,31 @@ async def cmd_edit_last(message: types.Message, state: FSMContext):
 async def process_edit_last(message: types.Message, state: FSMContext):
     """Обработка редактирования."""
     value = message.text.strip()
-    
+
     if value == "-":
         await message.answer("Отменено.")
         await state.clear()
         return
-    
+
     telegram_id = message.from_user.id
-    
-    # Пробуем распарсить как число
+
     new_amount = None
     new_description = None
-    
+
     try:
         new_amount = float(value.replace(",", "."))
     except ValueError:
-        # Значит это описание
         new_description = value
-    
+
     try:
         tx = await api.edit_last_transaction(
             telegram_id=telegram_id,
             new_amount=new_amount,
             new_description=new_description,
         )
-        
         text = "✅ Последняя операция изменена:\n\n" + format_transaction(tx)
         await message.answer(text, parse_mode="HTML")
-        
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
-    
+
     await state.clear()
