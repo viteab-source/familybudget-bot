@@ -2,6 +2,7 @@
 Эндпоинты для работы с транзакциями (расходы/доходы).
 """
 import csv
+import logging
 from io import StringIO
 from datetime import datetime, timedelta
 from typing import List
@@ -17,6 +18,7 @@ from ..utils import attach_budget_info_to_tx, extract_merchant_from_text
 from ..ai import parse_text_to_transaction
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("", response_model=schemas.TransactionRead)
@@ -43,14 +45,14 @@ def create_transaction(
     }
     """
     user, household = get_or_create_user_and_household(db, telegram_id)
-
+    
     kind = (tx.kind or "expense").lower()
     if kind not in ("expense", "income"):
         raise HTTPException(
             status_code=400,
             detail="kind должен быть 'expense' или 'income'",
         )
-
+    
     # Ищем или создаём категорию
     category_id = None
     if tx.category:
@@ -63,6 +65,7 @@ def create_transaction(
             )
             .first()
         )
+        
         if not category:
             category = models.Category(
                 household_id=household.id,
@@ -71,11 +74,12 @@ def create_transaction(
             db.add(category)
             db.commit()
             db.refresh(category)
+        
         category_id = category.id
-
+    
     # Определяем merchant (магазин)
     merchant = extract_merchant_from_text(tx.description)
-
+    
     db_tx = models.Transaction(
         household_id=household.id,
         user_id=user.id if user else None,
@@ -91,10 +95,10 @@ def create_transaction(
     db.add(db_tx)
     db.commit()
     db.refresh(db_tx)
-
+    
     # Дополняем транзакцию данными по бюджету (если есть)
     attach_budget_info_to_tx(db, household, db_tx)
-
+    
     return db_tx
 
 
@@ -117,15 +121,16 @@ def list_transactions(
     GET /transactions?telegram_id=123456789&kind=expense
     """
     user, household = get_or_create_user_and_household(db, telegram_id)
-
+    
     query = db.query(models.Transaction).filter(
         models.Transaction.household_id == household.id
     )
-
+    
     if start_date:
         query = query.filter(models.Transaction.date >= start_date)
     if end_date:
         query = query.filter(models.Transaction.date <= end_date)
+    
     if kind is not None:
         kind = kind.lower()
         if kind not in ("expense", "income"):
@@ -134,8 +139,9 @@ def list_transactions(
                 detail="kind должен быть 'expense' или 'income'",
             )
         query = query.filter(models.Transaction.kind == kind)
-
+    
     transactions = query.order_by(models.Transaction.date.desc()).all()
+    
     return transactions
 
 
@@ -151,13 +157,13 @@ def get_last_transaction(
     GET /transactions/last?telegram_id=123456789
     """
     user, household = get_or_create_user_and_household(db, telegram_id)
-
+    
     if not user:
         raise HTTPException(
             status_code=400,
             detail="telegram_id is required",
         )
-
+    
     tx = (
         db.query(models.Transaction)
         .filter(
@@ -167,13 +173,13 @@ def get_last_transaction(
         .order_by(models.Transaction.created_at.desc())
         .first()
     )
-
+    
     if not tx:
         raise HTTPException(
             status_code=404,
             detail="У тебя ещё нет транзакций",
         )
-
+    
     return tx
 
 
@@ -189,13 +195,13 @@ def delete_last_transaction(
     POST /transactions/delete-last?telegram_id=123456789
     """
     user, household = get_or_create_user_and_household(db, telegram_id)
-
+    
     if not user:
         raise HTTPException(
             status_code=400,
             detail="telegram_id is required",
         )
-
+    
     tx = (
         db.query(models.Transaction)
         .filter(
@@ -205,16 +211,16 @@ def delete_last_transaction(
         .order_by(models.Transaction.created_at.desc())
         .first()
     )
-
+    
     if not tx:
         raise HTTPException(
             status_code=404,
             detail="У тебя нет транзакций для удаления",
         )
-
+    
     db.delete(tx)
     db.commit()
-
+    
     return tx
 
 
@@ -238,13 +244,13 @@ def edit_last_transaction(
     POST /transactions/edit-last?telegram_id=123456789&new_amount=1500&new_description=Ужин
     """
     user, household = get_or_create_user_and_household(db, telegram_id)
-
+    
     if not user:
         raise HTTPException(
             status_code=400,
             detail="telegram_id is required",
         )
-
+    
     tx = (
         db.query(models.Transaction)
         .filter(
@@ -254,28 +260,28 @@ def edit_last_transaction(
         .order_by(models.Transaction.created_at.desc())
         .first()
     )
-
+    
     if not tx:
         raise HTTPException(
             status_code=404,
             detail="У тебя нет транзакций для изменения",
         )
-
+    
     # Обновляем поля
     if new_amount is not None:
         tx.amount = new_amount
-
+    
     if new_description is not None and new_description.strip():
         tx.description = new_description.strip()
         # Пересчитываем merchant при изменении описания
         tx.merchant = extract_merchant_from_text(tx.description)
-
+    
     db.commit()
     db.refresh(tx)
-
+    
     # Дополняем данными по бюджету
     attach_budget_info_to_tx(db, household, tx)
-
+    
     return tx
 
 
@@ -292,20 +298,20 @@ def set_last_transaction_category(
     POST /transactions/set-category-last?telegram_id=123456789&category=Продукты
     """
     user, household = get_or_create_user_and_household(db, telegram_id)
-
+    
     if not user:
         raise HTTPException(
             status_code=400,
             detail="telegram_id is required",
         )
-
+    
     category = category.strip()
     if not category:
         raise HTTPException(
             status_code=400,
             detail="Категория не может быть пустой",
         )
-
+    
     tx = (
         db.query(models.Transaction)
         .filter(
@@ -315,13 +321,13 @@ def set_last_transaction_category(
         .order_by(models.Transaction.created_at.desc())
         .first()
     )
-
+    
     if not tx:
         raise HTTPException(
             status_code=404,
             detail="У тебя нет транзакций",
         )
-
+    
     # Ищем или создаём категорию
     cat_obj = (
         db.query(models.Category)
@@ -331,7 +337,7 @@ def set_last_transaction_category(
         )
         .first()
     )
-
+    
     if not cat_obj:
         cat_obj = models.Category(
             household_id=household.id,
@@ -340,124 +346,228 @@ def set_last_transaction_category(
         db.add(cat_obj)
         db.commit()
         db.refresh(cat_obj)
-
+    
     # Обновляем транзакцию
     tx.category = category
     tx.category_id = cat_obj.id
-
+    
     db.commit()
     db.refresh(tx)
-
+    
     # Дополняем данными по бюджету
     attach_budget_info_to_tx(db, household, tx)
-
+    
     return tx
-
 
 @router.post("/parse-and-create", response_model=schemas.TransactionRead)
 def parse_and_create_transaction(
-    body: schemas.ParseTextRequest,
+    body: schemas.ParseAndCreateRequest,
     telegram_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """
-    Разбор свободного текста через YandexGPT + создание транзакции (расход).
-    
-    Пример:
-    POST /transactions/parse-and-create?telegram_id=123456789
-    Body: {"text": "Перекрёсток продукты 2435₽ вчера"}
-    
-    ИИ извлечёт:
-    - amount: 2435
-    - category: "Продукты"
-    - description: "Перекрёсток"
-    - date: вчера
+    Разобрать текст через YandexGPT, применить локальные переопределения категорий
+    и создать транзакцию.
     """
+    import re
+
     user, household = get_or_create_user_and_household(db, telegram_id)
+    if not user:
+        raise HTTPException(status_code=400, detail="telegram_id is required")
 
-    # Вызываем ИИ для разбора текста
-    try:
-        parsed = parse_text_to_transaction(body.text)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Ошибка разбора текста через ИИ: {e}",
+    raw_text = body.text.strip()
+    if not raw_text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    # --- 1. Нормализуем паттерн для поиска override ---
+    normalized_pattern = raw_text.lower()
+    normalized_pattern = re.sub(r"[0-9₽$€.,:/-]+", " ", normalized_pattern)
+    normalized_pattern = re.sub(r"\s+", " ", normalized_pattern).strip()
+
+    override = (
+        db.query(models.CategoryOverride)
+        .filter(
+            models.CategoryOverride.household_id == household.id,
+            models.CategoryOverride.user_id == user.id,
+            models.CategoryOverride.normalized_pattern == normalized_pattern,
+            models.CategoryOverride.counter >= 2,
         )
+        .order_by(models.CategoryOverride.counter.desc())
+        .first()
+    )
 
-    # Нормализуем сумму
-    amount = float(parsed.get("amount", 0))
-    if amount <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="ИИ не смог определить сумму",
-        )
+    # --- 2. Вызываем YandexGPT ---
+    parsed = parse_text_to_transaction(raw_text)
 
-    currency = parsed.get("currency", "RUB")
-    category_name = parsed.get("category")
-    description = parsed.get("description")
+    amount = parsed.get("amount")
+    if not amount or amount <= 0:
+        raise HTTPException(status_code=400, detail="Не удалось определить сумму")
 
-    # Дата
-    date_str = parsed.get("date")
-    tx_date = datetime.utcnow()
-    if date_str:
-        try:
-            tx_date = datetime.fromisoformat(date_str)
-        except ValueError:
-            pass
+    description = parsed.get("description") or raw_text
+    ai_category = parsed.get("category") or "Другое"
+    candidate_categories: list[str] = parsed.get("candidate_categories") or [ai_category, "Другое"]
 
-    # Ищем или создаём категорию
+    # --- 3. Применяем локальный override категории ---
+    final_category = ai_category
+    if override:
+        final_category = override.category
+
+        # ставим override категорией №1 в candidatах
+        normalized_candidates = [c.strip() for c in candidate_categories if c.strip()]
+        if final_category not in normalized_candidates:
+            candidate_categories.insert(0, final_category)
+        else:
+            # поднимаем её наверх
+            candidate_categories = [final_category] + [
+                c for c in normalized_candidates if c != final_category
+            ]
+
+    # нормализуем регистр для хранения
+    final_category = final_category.strip().title()
+    candidate_categories = [c.strip().title() for c in candidate_categories]
+
+    # --- 4. Ищем/создаём Category ---
     category_id = None
-    if category_name:
-        cat_name = category_name.strip()
+    if final_category:
         category = (
             db.query(models.Category)
             .filter(
                 models.Category.household_id == household.id,
-                models.Category.name == cat_name,
+                models.Category.name.ilike(final_category),
             )
             .first()
         )
         if not category:
-            category = models.Category(
-                household_id=household.id,
-                name=cat_name,
-            )
+            category = models.Category(household_id=household.id, name=final_category)
             db.add(category)
             db.commit()
             db.refresh(category)
         category_id = category.id
 
-    # Определяем merchant
-    # Объединяем description + category + исходный текст для поиска
-    combined_text = f"{description} {category_name} {body.text}"
-    merchant = extract_merchant_from_text(combined_text)
+    # --- 5. Дата операции ---
+    # parsed["date"] приходит как YYYY-MM-DD, если получилось распарсить
+    parsed_date = parsed.get("date")
+    if parsed_date:
+        try:
+            tx_date = datetime.strptime(parsed_date, "%Y-%m-%d")
+        except ValueError:
+            tx_date = datetime.utcnow()
+    else:
+        tx_date = datetime.utcnow()
 
-    # Создаём транзакцию
+    merchant = extract_merchant_from_text(description)
+
     db_tx = models.Transaction(
         household_id=household.id,
-        user_id=user.id if user else None,
+        user_id=user.id,
         amount=amount,
-        currency=currency,
+        currency=parsed.get("currency") or household.currency,
         description=description,
-        category=category_name,
+        category=final_category,
         category_id=category_id,
         merchant=merchant,
         kind="expense",
         date=tx_date,
     )
+
     db.add(db_tx)
     db.commit()
     db.refresh(db_tx)
 
-    # Дополняем данными по бюджету
+    # приклеиваем candidate_categories в атрибут, чтобы отдать в API
+    db_tx.candidate_categories = candidate_categories  # type: ignore[attr-defined]
+
     attach_budget_info_to_tx(db, household, db_tx)
-    
-    # Добавляем candidate_categories из AI (для умных кнопок)
-    candidate_cats = parsed.get("candidate_categories", [])
-    # Используем setattr чтобы добавить поле в объект (не в БД)
-    db_tx.candidate_categories = candidate_cats
 
     return db_tx
+
+@router.post("/suggest-categories", response_model=schemas.SuggestCategoriesResponse)
+async def suggest_categories_only(
+    body: schemas.ParseTextRequest,
+    telegram_id: int = Query(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Предложить категории БЕЗ создания транзакции (для /aiadd в боте).
+    
+    Возвращает топ-3 категории, которые реально существуют в семье.
+    
+    Пример:
+    POST /transactions/suggest-categories?telegram_id=123456789
+    Body: {"text": "Магнит 500"}
+    
+    Response: {
+        "text": "Магнит 500",
+        "amount": 500.0,
+        "currency": "RUB",
+        "suggestions": ["Продукты", "Химия и бытовое", "Другое"],
+        "confidence": 0.8
+    }
+    """
+    user, household = get_or_create_user_and_household(db, telegram_id)
+    
+    # Вызываем AI для разбора
+    try:
+        parsed = parse_text_to_transaction(body.text)
+        logger.debug(f"AI suggest result: {parsed}")
+    except Exception as e:
+        logger.error(f"AI parse error in suggest: {e}")
+        raise HTTPException(status_code=500, detail=f"AI parse error: {e}")
+    
+    amount = float(parsed.get('amount', 0))
+    if amount == 0:
+        raise HTTPException(status_code=400, detail="No amount detected")
+    
+    # Получаем существующие категории семьи
+    existing_cats = db.query(models.Category).filter(
+        models.Category.household_id == household.id
+    ).all()
+    
+    # Создаём нормализованный словарь: lowercase -> оригинальное имя
+    cat_names_map = {cat.name.strip().lower(): cat.name for cat in existing_cats}
+    
+    # AI предлагает топ-3 категории
+    ai_suggestions = parsed.get('candidate_categories', [])
+    
+    # Фильтруем: оставляем только те, что реально есть в семье (case-insensitive)
+    suggestions = []
+    for ai_cat in ai_suggestions[:3]:
+        normalized = ai_cat.strip().lower()
+        if normalized in cat_names_map:
+            suggestions.append(cat_names_map[normalized])
+    
+    # Если после фильтрации пусто, добавляем основную категорию AI или создаём её
+    if not suggestions:
+        main_category = parsed.get('category', 'Другое')
+        # Ищем или создаём категорию
+        cat_obj = (
+            db.query(models.Category)
+            .filter(
+                models.Category.household_id == household.id,
+                models.Category.name == main_category,
+            )
+            .first()
+        )
+        
+        if not cat_obj:
+            cat_obj = models.Category(
+                household_id=household.id,
+                name=main_category,
+            )
+            db.add(cat_obj)
+            db.commit()
+            logger.info(f"Created new category: {main_category}")
+        
+        suggestions = [main_category]
+    
+    return {
+        "text": body.text,
+        "amount": amount,
+        "currency": parsed.get('currency', 'RUB'),
+        "suggestions": suggestions,
+        "confidence": 0.8  # TODO: реальная вероятность из YandexGPT
+    }
+
 
 @router.get("/export/csv")
 def export_transactions_csv(
@@ -473,7 +583,7 @@ def export_transactions_csv(
     """
     since = datetime.utcnow() - timedelta(days=days)
     user, household = get_or_create_user_and_household(db, telegram_id)
-
+    
     txs = (
         db.query(models.Transaction)
         .filter(
@@ -483,10 +593,11 @@ def export_transactions_csv(
         .order_by(models.Transaction.date.asc())
         .all()
     )
-
+    
     def generate():
         output = StringIO()
         writer = csv.writer(output, delimiter=";")
+        
         writer.writerow(
             [
                 "id",
@@ -501,7 +612,7 @@ def export_transactions_csv(
         yield output.getvalue()
         output.seek(0)
         output.truncate(0)
-
+        
         for tx in txs:
             writer.writerow(
                 [
@@ -517,11 +628,11 @@ def export_transactions_csv(
             yield output.getvalue()
             output.seek(0)
             output.truncate(0)
-
+    
     headers = {
         "Content-Disposition": f'attachment; filename="transactions_{days}d.csv"'
     }
-
+    
     return StreamingResponse(
         generate(),
         media_type="text/csv",

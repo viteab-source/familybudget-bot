@@ -9,7 +9,6 @@ from typing import Optional
 class APIClient:
     """
     Централизованный клиент для вызовов Backend API.
-    
     Использование:
         client = APIClient(base_url="http://127.0.0.1:8000")
         me = await client.get_me(telegram_id=123456789)
@@ -17,16 +16,6 @@ class APIClient:
 
     def __init__(self, base_url: str):
         self.base_url = base_url
-
-    async def set_last_transaction_category(self, telegram_id: int, category: str) -> dict:
-        """Изменить категорию последней транзакции"""
-        url = f"{self.base_url}/transactions/set-category-last"
-        params = {"telegram_id": telegram_id, "category": category}
-        
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, params=params, timeout=10.0)
-            resp.raise_for_status()
-            return resp.json()
 
     # ==========================================
     # ПОЛЬЗОВАТЕЛИ
@@ -219,6 +208,21 @@ class APIClient:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{self.base_url}/transactions/parse-and-create",
+                params={"telegram_id": telegram_id},
+                json={"text": text},
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def suggest_categories(self, telegram_id: int, text: str):
+        """
+        НОВОЕ: Предложить категории БЕЗ создания транзакции.
+        Используется для /aiadd с inline-кнопками.
+        """
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/transactions/suggest-categories",
                 params={"telegram_id": telegram_id},
                 json={"text": text},
                 timeout=30.0,

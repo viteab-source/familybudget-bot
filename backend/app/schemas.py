@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Optional, List
+
 from pydantic import BaseModel
+
 
 # -----------------------
 # ТРАНЗАКЦИИ
@@ -14,7 +16,7 @@ class TransactionBase(BaseModel):
     date: Optional[datetime] = None
     # "expense" — расход, "income" — доход
     kind: str = "expense"
-
+    
     class Config:
         from_attributes = True
 
@@ -27,8 +29,10 @@ class TransactionRead(TransactionBase):
     id: int
     household_id: int
     user_id: Optional[int] = None
+    category_id: Optional[int] = None  # НОВОЕ: ссылка на категорию в БД
+    merchant: Optional[str] = None     # НОВОЕ: магазин/сервис
     created_at: datetime
-
+    
     # Новое: данные по бюджету (если есть)
     budget_limit: Optional[float] = None
     budget_spent: Optional[float] = None
@@ -37,6 +41,60 @@ class TransactionRead(TransactionBase):
     # Умные категории: топ-3 предложенных AI категории
     candidate_categories: Optional[List[str]] = None
 
+
+# -----------------------
+# AI И КАТЕГОРИИ
+# -----------------------
+
+class ParseTextRequest(BaseModel):
+    """Тело запроса для AI-парсинга текста."""
+    text: str
+
+
+class SuggestCategoriesResponse(BaseModel):
+    """
+    Ответ от /transactions/suggest-categories.
+    Топ-3 категории без создания транзакции.
+    """
+    text: str
+    amount: float
+    currency: str
+    suggestions: List[str]
+    confidence: float
+
+
+# -----------------------
+# КАТЕГОРИИ 2.0
+# -----------------------
+
+class CategoryBase(BaseModel):
+    """
+    Базовая схема категории.
+    household_id на клиенте не передаём — бекенд подставит сам.
+    """
+    name: str
+    parent_id: Optional[int] = None
+    sort_order: Optional[int] = None
+
+
+class CategoryCreate(CategoryBase):
+    """
+    Тело запроса для создания категории.
+    Пока совпадает с базовой схемой.
+    """
+    pass
+
+
+class CategoryRead(CategoryBase):
+    """
+    То, что возвращаем наружу.
+    """
+    id: int
+    
+    class Config:
+        from_attributes = True
+
+
 # -----------------------
 # ОТЧЁТЫ
 # -----------------------
@@ -44,7 +102,7 @@ class TransactionRead(TransactionBase):
 class CategorySummary(BaseModel):
     category: Optional[str]
     amount: float
-
+    
     class Config:
         from_attributes = True
 
@@ -92,7 +150,7 @@ class MembersReport(BaseModel):
 class ShopSummary(BaseModel):
     merchant: str
     amount: float
-
+    
     class Config:
         from_attributes = True
 
@@ -113,7 +171,7 @@ class ReminderBase(BaseModel):
     currency: str = "RUB"
     interval_days: Optional[int] = None
     next_run_at: Optional[datetime] = None
-
+    
     class Config:
         from_attributes = True
 
@@ -199,40 +257,21 @@ class UserSetNameRequest(BaseModel):
 
 
 # -----------------------
-# ПРОЧЕЕ
+# ОБЩИЕ СХЕМЫ
 # -----------------------
 
-class ParseTextRequest(BaseModel):
+class StatusResponse(BaseModel):
+    """
+    Универсальный ответ для простых операций.
+    Используется в /categories/feedback и других эндпоинтах.
+    """
+    status: str
+    message: Optional[str] = None
+
+from pydantic import BaseModel
+
+class ParseAndCreateRequest(BaseModel):
+    """
+    Запрос для /transactions/parse-and-create.
+    """
     text: str
-
-
-# -----------------------
-# КАТЕГОРИИ 2.0
-# -----------------------
-
-class CategoryBase(BaseModel):
-    """
-    Базовая схема категории.
-    household_id на клиенте не передаём — бекенд подставит сам.
-    """
-    name: str
-    parent_id: Optional[int] = None
-    sort_order: Optional[int] = None
-
-
-class CategoryCreate(CategoryBase):
-    """
-    Тело запроса для создания категории.
-    Пока совпадает с базовой схемой.
-    """
-    pass
-
-
-class CategoryRead(CategoryBase):
-    """
-    То, что возвращаем наружу.
-    """
-    id: int
-
-    class Config:
-        from_attributes = True
