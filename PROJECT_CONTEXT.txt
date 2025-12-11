@@ -1,0 +1,327 @@
+===========================================
+FAMILYBUDGET BOT - PROJECT CONTEXT (v2)
+=======================================
+
+GitHub: [https://github.com/viteab-source/familybudget-bot](https://github.com/viteab-source/familybudget-bot)
+Полное ТЗ и чек-лист: см. файл PROJECT_SPEC_v2.md в корне репозитория.
+
+# PRODUCT OVERVIEW
+
+FamilyBudget — семейный финансовый ассистент в Telegram.
+
+Идея: каждый член семьи пишет боту как человеку:
+«Перекрёсток, продукты 2435 вчера» → дальше всё делает ИИ:
+
+* вытаскивает сумму и валюту,
+* определяет дату,
+* подбирает категорию,
+* определяет магазин (merchant),
+* создаёт транзакцию в Postgres.
+
+Функции:
+
+* учёт расходов/доходов для семьи;
+* бюджеты по категориям;
+* отчёты по семье, по людям, по магазинам;
+* напоминания (коммуналка, кредиты и т.п.);
+* локальная «память» категорий (бот учится на исправлениях).
+
+# TECH STACK
+
+* Python 3
+* Backend: FastAPI + PostgreSQL + SQLAlchemy
+* Bot: aiogram 3 + FSM
+* AI:
+
+  * Yandex STT — распознавание голосовых сообщений
+  * YandexGPT JSON API — разбор текстов расходов/доходов
+* API: REST, все endpoints с префиксом /api
+* Конфигурация: .env (BOT_TOKEN, API_BASE_URL, DATABASE_URL, YANDEX_API_KEY и т.д.)
+
+# MAIN ENTITIES (БД)
+
+User
+
+* Telegram-пользователь (telegram_id, name)
+
+Household
+
+* Семья/домохозяйство (name, currency, privacy_mode)
+
+HouseholdMember
+
+* Связь user ↔ household + роль (owner/admin/member)
+
+Category
+
+* Категории 2.0: дерево (name, parent_id, sort_order, household_id)
+
+Transaction
+
+* Операция: household_id, user_id
+* amount, currency
+* kind: "expense" / "income"
+* description
+* category (legacy строка)
+* category_id → Category
+* merchant (магазин/сервис)
+* date, created_at
+
+CategoryBudget
+
+* Бюджет по категории на месяц (category_id, period_month, limit_amount)
+
+Reminder
+
+* Напоминания: title, amount, currency
+* household_id, user_id
+* interval_days, next_run_at, is_active
+
+HouseholdInvite
+
+* Инвайты в семью: code, household_id, expires_at
+
+CategoryFeedback
+
+* Лог исправлений категорий пользователем:
+
+  * old_category / new_category
+  * source (ai_suggestion, manual, typo_suggestion и т.п.)
+  * message_text, transaction_id
+
+CategoryOverride
+
+* Локальная память категорий:
+
+  * шаблон текста/описания → выбранная категория
+  * используется в AI-разборе для автоподстановки категорий по истории исправлений
+
+# BACKEND STRUCTURE (backend/app)
+
+main.py
+
+* Инициализация FastAPI-приложения
+* Подключение всех роутеров с префиксом /api
+* Настройка CORS, логгирования и т.п.
+
+database.py
+
+* Подключение к PostgreSQL
+* SessionLocal, Base
+
+models.py
+
+* SQLAlchemy-модели:
+
+  * User, Household, HouseholdMember
+  * Category, Transaction, CategoryBudget
+  * Reminder, HouseholdInvite
+  * CategoryFeedback, CategoryOverride
+
+schemas.py
+
+* Pydantic-схемы:
+
+  * TransactionCreate / TransactionRead
+  * CategoryCreate / CategoryRead
+  * ReportSummary, BalanceReport
+  * ReminderCreate / ReminderRead
+  * DTO для всех основных эндпоинтов
+
+deps.py
+
+* get_db() — зависимость для сессии
+* get_or_create_user_and_household()
+* Общие зависимости для роутеров (по telegram_id и т.п.)
+
+utils.py
+
+* extract_merchant_from_text() — определение магазина
+* generate_invite_code() — генерация кода приглашения
+* attach_budget_info_to_tx() — добавление данных по бюджету
+* format_amount() — форматирование сумм
+* find_similar_category() — поиск похожих категорий (difflib)
+
+ai.py
+
+* Обёртки над YandexGPT:
+
+  * parse_text_to_transaction() — разбор текста в структуру транзакции
+  * (планируется) расширение до candidate_categories
+
+logging_config.py
+
+* Централизованная настройка логов backend
+
+# API ROUTES
+
+api/users.py
+
+* GET /api/me — информация о пользователе и его семье
+* POST /api/user/set-name — установить имя
+
+api/households.py
+
+* GET /api/household — информация о семье
+* GET /api/household/invite — код приглашения
+* POST /api/household/join — присоединиться по коду
+* POST /api/household/rename — переименовать семью
+* POST /api/household/leave — выйти из семьи
+
+api/categories.py
+
+* GET /api/categories — список категорий семьи (+ миграция старых строковых категорий)
+* POST /api/categories — создать категорию
+* POST /api/categories/rename — переименовать
+* POST /api/categories/merge — объединить
+* POST /api/categories/delete — удалить
+* POST /api/categories/feedback — логировать исправления категорий (CategoryFeedback)
+
+api/transactions.py
+
+* POST /api/transactions — создать транзакцию
+* GET /api/transactions — список транзакций
+* GET /api/transactions/last — последняя транзакция пользователя
+* POST /api/transactions/delete-last — удалить последнюю
+* POST /api/transactions/edit-last — изменить сумму/описание
+* POST /api/transactions/set-category-last — изменить категорию последней
+* POST /api/transactions/parse-and-create — создать транзакцию через AI:
+
+  * YandexGPT-разбор
+  * применение CategoryOverride
+  * определение merchant
+  * прикрепление бюджетной информации
+* GET /api/transactions/export/csv — экспорт в CSV
+
+api/budgets.py
+
+* POST /api/budget/set — установить лимит по категории
+* GET /api/budget/status — статус бюджетов по категориям
+
+api/reports.py
+
+* GET /api/report/summary — расходы по категориям
+* GET /api/report/balance — баланс (доходы/расходы)
+* GET /api/report/members — расходы по участникам семьи
+* GET /api/report/shops — расходы по магазинам (merchant)
+
+api/reminders.py
+
+* POST /api/reminders — создать напоминание
+* GET /api/reminders — список
+* GET /api/reminders/due-today — напоминания на сегодня
+* POST /api/reminders/{id}/mark-paid — отметить как оплачено (создать транзакцию)
+
+# BOT STRUCTURE (bot/)
+
+bot.py
+
+* Точка входа для Telegram-бота
+* Инициализация Dispatcher, регистрация хендлеров
+* Логирование запуска/остановки
+
+config.py
+
+* Чтение .env (BOT_TOKEN, API_BASE_URL и т.д.)
+
+services/api_client.py
+
+* Тонкий клиент для обращения к backend:
+
+  * методы под /api/transactions, /api/categories, /api/reports, /api/reminders и т.п.
+* Единый слой обработки ошибок API
+
+handlers/base.py
+
+* /start, /help
+* Базовые ответы и онбординг
+
+handlers/user_family.py
+
+* /setname — установить имя
+* /me — профиль
+* /family — информация о семье
+* /family_invite — код приглашения
+* /family_join — присоединиться по инвайту
+* /family_rename — переименовать семью
+* /family_leave — выйти из семьи (с подтверждением)
+
+handlers/transactions.py
+
+* /add — ручное добавление расхода
+* /income — ручное добавление дохода
+* /aiadd — добавление расхода через AI
+* Обработка произвольного текста как запрос на AI-транзакцию
+* Обработка голосовых сообщений:
+
+  * Yandex STT → текст → /api/transactions/parse-and-create
+* /last — показать последнюю транзакцию
+* /delete_last — удалить последнюю
+* /edit_last — изменить последнюю
+* Логика inline-кнопок:
+
+  * выбор/смена категории (умные категории v1)
+  * отправка feedback в /api/categories/feedback
+
+handlers/categories.py
+
+* /categories — список категорий
+* /cat_add — добавить категорию
+* /cat_rename — переименовать
+* /cat_merge — объединить
+* /cat_delete — удалить (с проверкой наличия транзакций)
+
+handlers/budgets.py
+
+* /budget_set — установить лимит
+* /budget_status — статус бюджетов
+
+handlers/reports.py
+
+* /report — общий отчёт
+* /report_me — отчёт по текущему пользователю
+* /report_members — по людям
+* /balance — общий баланс
+* /balance_me — баланс по пользователю
+* /report_shops — расходы по магазинам
+
+handlers/reminders.py
+
+* /remind_add — добавить напоминание
+* /reminders — список
+* /remind_today — напоминания на сегодня
+* /remind_pay — оплатить (создать расход и сдвинуть напоминание)
+
+# RUN COMMANDS
+
+Backend:
+uvicorn backend.app.main:app --reload
+Swagger: [http://localhost:8000/docs](http://localhost:8000/docs)
+
+Bot:
+python -m bot.bot
+
+Reset DB:
+python backend/app/reset_db.py
+
+Git (быстрые команды):
+git status
+git log --oneline --graph
+git add ...
+git commit -m "..."
+git push
+
+# NEXT STEPS (SUMMARY)
+
+Актуальный подробный список задач и приоритетов смотреть в PROJECT_SPEC_v2.md, секция:
+
+* "5. Что ещё предстоит сделать (чек-лист)"
+
+Кратко по приоритету:
+
+* Умные категории v2, локальная память (CategoryOverride + CategoryFeedback)
+* Защита от опечаток и дублей категорий (find_similar_category)
+* Улучшение UX выбора/изменения категорий в боте
+* Фильтры в отчётах по категориям
+* В дальнейшем: WebApp, чеки, тарифы, приватность, инфра.
+
