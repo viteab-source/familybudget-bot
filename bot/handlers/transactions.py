@@ -60,7 +60,7 @@ class EditLastStates(StatesGroup):
 
 class SetCategoryStates(StatesGroup):
     waiting_for_custom_category = State()
-
+    waiting_for_correction_confirm = State()
 
 # ==========================================
 # Вспомогательные функции
@@ -297,10 +297,12 @@ async def handle_category_change(callback: types.CallbackQuery, state: FSMContex
 
 @router.message(SetCategoryStates.waiting_for_custom_category)
 async def process_custom_category(message: types.Message, state: FSMContext):
-    """Обработка ввода своей категории"""
-    category = message.text.strip()
+    """Обработка ввода своей категории с учётом возможной автокоррекции на бэкенде."""
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-    if not category:
+    raw_category = message.text.strip()
+
+    if not raw_category:
         await message.answer("❌ Категория не может быть пустой. Попробуй ещё раз:")
         return
 
@@ -308,18 +310,95 @@ async def process_custom_category(message: types.Message, state: FSMContext):
 
     try:
         # Меняем категорию у последней транзакции
-        tx = await api.set_last_transaction_category(telegram_id, category)
+        tx = await api.set_last_transaction_category(telegram_id, raw_category)
 
-        # Явное подтверждение пользователю
-        text = "✅ Категория изменена:\n\n" + format_transaction(tx)
-        await message.answer(text, parse_mode="HTML")
+        backend_category = tx.get("category") or raw_category
 
-        # Логируем выбор для обучения AI
-        await log_category_feedback(telegram_id, category, tx.get("id"))
+        # Если бэкенд фактически использовал другое имя категории — предлагаем подтвердить
+        if backend_category != raw_category:
+            # Сохраняем данные в состояние, чтобы знать выбор пользователя позже
+            await state.update_data(
+                raw_category=raw_category,
+                backend_category=backend_category,
+                tx_id=tx.get("id"),
+            )
+
+            text = (
+                f"🤔 Похоже, ты имел в виду «{backend_category}», а не «{raw_category}».\n"
+                f"Как сохранить?"
+            )
+
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=f"✅ {backend_category}",
+                            callback_data="catfix_accept_backend",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text=f"Оставить «{raw_category}»",
+                            callback_data="catfix_keep_raw",
+                        )
+                    ],
+                ]
+            )
+
+            await message.answer(text, reply_markup=kb)
+            await state.set_state(SetCategoryStates.waiting_for_correction_confirm)
+        else:
+            # Имя категории не менялось — ведём себя как раньше
+            text = "✅ Категория изменена:\n\n" + format_transaction(tx)
+            await message.answer(text, parse_mode="HTML")
+
+            # Логируем выбор для обучения AI
+            await log_category_feedback(telegram_id, backend_category, tx.get("id"))
+
+            # Выходим из состояния
+            await state.clear()
+
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
+        await state.clear()
+
+@router.callback_query(
+    SetCategoryStates.waiting_for_correction_confirm,
+    F.data.in_(["catfix_accept_backend", "catfix_keep_raw"]),
+)
+async def handle_category_correction_confirm(callback: types.CallbackQuery, state: FSMContext):
+    """Подтверждение исправления категории после автокоррекции бэкендом."""
+    data = await state.get_data()
+    raw_category = data.get("raw_category")
+    backend_category = data.get("backend_category")
+    tx_id = data.get("tx_id")
+    telegram_id = callback.from_user.id
+
+    choice = callback.data
+
+    try:
+        if choice == "catfix_accept_backend":
+            # Пользователь соглашается с исправленной категорией
+            # Категория уже выставлена на бэкенде (backend_category), просто логируем feedback
+            await log_category_feedback(telegram_id, backend_category, tx_id)
+            await callback.message.edit_text(
+                f"✅ Оставляем категорию «{backend_category}».\n"
+                f"Твоё исправление поможет боту запоминать такие случаи.",
+                reply_markup=None,
+            )
+        else:
+            # Пользователь хочет оставить свою «кривую» категорию
+            # Явно выставляем её на бэкенде
+            tx = await api.set_last_transaction_category(telegram_id, raw_category)
+            await log_category_feedback(telegram_id, raw_category, tx.get("id"))
+
+            text = "✅ Категория изменена:\n\n" + format_transaction(tx)
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=None)
+
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
     finally:
-        # Всегда выходим из FSM, чтобы дальше обычный текст шёл в ИИ
         await state.clear()
 
 @router.message(AIAddStates.waiting_for_text)
