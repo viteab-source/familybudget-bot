@@ -14,9 +14,9 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_or_create_user_and_household
-from ..utils import attach_budget_info_to_tx, extract_merchant_from_text
+from ..utils import attach_budget_info_to_tx, extract_merchant_from_text, resolve_category_with_typos
 from ..ai import parse_text_to_transaction
-import difflib  
+  
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -24,52 +24,6 @@ logger = logging.getLogger(__name__)
 # ==========================================
 # Вспомогательные функции
 # ==========================================
-
-def find_similar_category(db: Session, household_id: int, raw_name: str) -> str | None:
-    """
-    Ищет похожую категорию по уже существующим в семье.
-    Возвращает имя существующей категории, если нашлась достаточно похожая.
-    Иначе None.
-
-    Простая логика:
-    - сравнение по SequenceMatcher из difflib
-    - порог похожести 0.8
-    """
-    name = (raw_name or "").strip()
-    if not name:
-        return None
-
-    # Берём только более-менее осмысленные строки
-    if len(name) < 3:
-        return None
-
-    # Приводим к нижнему регистру для сравнения
-    name_lower = name.lower()
-
-    categories = (
-        db.query(models.Category)
-        .filter(models.Category.household_id == household_id)
-        .all()
-    )
-
-    best_match = None
-    best_ratio = 0.0
-
-    for cat in categories:
-        cat_lower = (cat.name or "").lower()
-        if not cat_lower:
-            continue
-
-        ratio = difflib.SequenceMatcher(a=name_lower, b=cat_lower).ratio()
-        if ratio > best_ratio:
-            best_ratio = ratio
-            best_match = cat.name
-
-    # Порог похожести — эмпирически 0.8 достаточно, чтобы ловить "Такиси" -> "Такси"
-    if best_match and best_ratio >= 0.8:
-        return best_match
-
-    return None
 
 
 @router.post("", response_model=schemas.TransactionRead)
@@ -80,11 +34,11 @@ def create_transaction(
 ):
     """
     Создать транзакцию (расход или доход).
-    
+
     kind:
     - "expense" (по умолчанию) — расход
     - "income" — доход
-    
+
     Пример:
     POST /transactions?telegram_id=123456789
     Body: {
@@ -95,65 +49,55 @@ def create_transaction(
         "kind": "expense"
     }
     """
+    # 1. Находим (или создаём) пользователя и семью
     user, household = get_or_create_user_and_household(db, telegram_id)
-    
+
+    # 2. Проверяем тип операции
     kind = (tx.kind or "expense").lower()
     if kind not in ("expense", "income"):
         raise HTTPException(
             status_code=400,
             detail="kind должен быть 'expense' или 'income'",
         )
-    
-    # Ищем или создаём категорию с учётом опечаток
-    category_id = None
-    if tx.category:
-        raw_name = tx.category.strip()
 
-        # 1) Сначала пробуем найти точное совпадение по имени
-        category = (
-            db.query(models.Category)
-            .filter(
-                models.Category.household_id == household.id,
-                models.Category.name == raw_name,
-            )
-            .first()
+    # 3. Обрабатываем категорию с учётом опечаток
+    category_id: int | None = None
+    final_category_name: str | None = None
+
+    raw_category_input: str | None = tx.category.strip() if tx.category else None
+    suggested_category_name: str | None = None
+    needs_confirmation: bool = False
+
+    if raw_category_input:
+        # Используем общий хелпер из utils.resolve_category_with_typos
+        category_obj, _original_name, needs_confirmation = resolve_category_with_typos(
+            db=db,
+            household_id=household.id,
+            raw_name=raw_category_input,
+            force_new=False,
         )
+        category_id = category_obj.id
+        final_category_name = category_obj.name
+        suggested_category_name = category_obj.name
+    else:
+        # Категорию не передали — оставляем как есть
+        category_id = None
+        final_category_name = None
+        suggested_category_name = None
+        needs_confirmation = False
 
-        # 2) Если точного совпадения нет — пробуем найти похожую категорию
-        if not category:
-            similar_name = find_similar_category(db, household.id, raw_name)
-            if similar_name:
-                category = (
-                    db.query(models.Category)
-                    .filter(
-                        models.Category.household_id == household.id,
-                        models.Category.name == similar_name,
-                    )
-                    .first()
-                )
-
-        # 3) Если ни точной, ни похожей не нашли — создаём новую категорию
-        if not category:
-            category = models.Category(
-                household_id=household.id,
-                name=raw_name,
-            )
-            db.add(category)
-            db.commit()
-            db.refresh(category)
-
-        category_id = category.id
-
-    # Определяем merchant (магазин)
+    # 4. Определяем магазин (merchant) по описанию
     merchant = extract_merchant_from_text(tx.description)
-    
+
+    # 5. Создаём объект транзакции в БД
     db_tx = models.Transaction(
         household_id=household.id,
         user_id=user.id if user else None,
         amount=tx.amount,
         currency=tx.currency or household.currency,
         description=tx.description,
-        category=tx.category,
+        # Строковое поле category храним в "исправленном" варианте
+        category=final_category_name,
         category_id=category_id,
         merchant=merchant,
         kind=kind,
@@ -162,12 +106,17 @@ def create_transaction(
     db.add(db_tx)
     db.commit()
     db.refresh(db_tx)
-    
-    # Дополняем транзакцию данными по бюджету (если есть)
-    attach_budget_info_to_tx(db, household, db_tx)
-    
-    return db_tx
 
+    # 6. Дополняем транзакцию данными по бюджету
+    attach_budget_info_to_tx(db, household, db_tx)
+
+    # 7. Навешиваем на объект дополнительные поля для схемы TransactionRead
+    #    (Pydantic их заберёт, т.к. Config.from_attributes = True)
+    db_tx.raw_category = raw_category_input           # что ввёл пользователь
+    db_tx.suggested_category = suggested_category_name  # на что исправили
+    db_tx.needs_confirmation = needs_confirmation     # нужно ли спрашивать подтверждение
+
+    return db_tx
 
 @router.get("", response_model=List[schemas.TransactionRead])
 def list_transactions(
