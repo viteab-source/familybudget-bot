@@ -346,8 +346,7 @@ def delete_category(
     return category
 
 
-
-@router.post("/feedback")
+@router.post("/feedback", response_model=schemas.StatusResponse)
 def log_category_feedback(
     body: dict,
     telegram_id: int | None = Query(default=None),
