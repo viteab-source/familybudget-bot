@@ -395,28 +395,46 @@ def set_last_transaction_category(
             detail="У тебя нет транзакций",
         )
     
-    # Ищем или создаём категорию
+    # Ищем или создаём категорию с учётом опечаток
+    raw_name = category
+
+    # 1) Сначала пробуем найти точное совпадение
     cat_obj = (
         db.query(models.Category)
         .filter(
             models.Category.household_id == household.id,
-            models.Category.name == category,
+            models.Category.name == raw_name,
         )
         .first()
     )
-    
+
+    # 2) Если точного нет — ищем похожую категорию
+    if not cat_obj:
+        similar_name = find_similar_category(db, household.id, raw_name)
+        if similar_name:
+            cat_obj = (
+                db.query(models.Category)
+                .filter(
+                    models.Category.household_id == household.id,
+                    models.Category.name == similar_name,
+                )
+                .first()
+            )
+
+    # 3) Если ничего не нашли — создаём новую категорию
     if not cat_obj:
         cat_obj = models.Category(
             household_id=household.id,
-            name=category,
+            name=raw_name,
         )
         db.add(cat_obj)
         db.commit()
         db.refresh(cat_obj)
-    
+
     # Обновляем транзакцию
-    tx.category = category
+    tx.category = cat_obj.name
     tx.category_id = cat_obj.id
+
     
     db.commit()
     db.refresh(tx)
