@@ -25,7 +25,7 @@ class APIClient:
         """Получить информацию о пользователе и его семье."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self.base_url}/api/me",
+                f"{self.base_url}/me",
                 params={"telegram_id": telegram_id},
                 timeout=10.0,
             )
@@ -36,7 +36,7 @@ class APIClient:
         """Установить имя пользователя."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/user/set-name",
+                f"{self.base_url}/user/set-name",
                 params={"telegram_id": telegram_id},
                 json={"name": name},
                 timeout=10.0,
@@ -52,7 +52,7 @@ class APIClient:
         """Получить информацию о семье."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self.base_url}/api/household",
+                f"{self.base_url}/household",
                 params={"telegram_id": telegram_id},
                 timeout=10.0,
             )
@@ -63,7 +63,7 @@ class APIClient:
         """Получить код приглашения в семью."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self.base_url}/api/household/invite",
+                f"{self.base_url}/household/invite",
                 params={"telegram_id": telegram_id},
                 timeout=10.0,
             )
@@ -74,7 +74,7 @@ class APIClient:
         """Присоединиться к семье по коду."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/household/join",
+                f"{self.base_url}/household/join",
                 params={"telegram_id": telegram_id},
                 json={"code": code},
                 timeout=10.0,
@@ -86,7 +86,7 @@ class APIClient:
         """Переименовать семью."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/household/rename",
+                f"{self.base_url}/household/rename",
                 params={"telegram_id": telegram_id},
                 json={"name": name},
                 timeout=10.0,
@@ -98,7 +98,7 @@ class APIClient:
         """Выйти из семьи."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/household/leave",
+                f"{self.base_url}/household/leave",
                 params={"telegram_id": telegram_id},
                 timeout=10.0,
             )
@@ -113,7 +113,7 @@ class APIClient:
         """Получить список категорий."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self.base_url}/api/categories",
+                f"{self.base_url}/categories",
                 params={"telegram_id": telegram_id},
                 timeout=10.0,
             )
@@ -124,7 +124,7 @@ class APIClient:
         """Создать категорию."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/categories",
+                f"{self.base_url}/categories",
                 params={"telegram_id": telegram_id},
                 json={"name": name},
                 timeout=10.0,
@@ -136,7 +136,7 @@ class APIClient:
         """Переименовать категорию."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/categories/rename",
+                f"{self.base_url}/categories/rename",
                 params={
                     "telegram_id": telegram_id,
                     "old_name": old_name,
@@ -151,7 +151,7 @@ class APIClient:
         """Объединить категории."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/categories/merge",
+                f"{self.base_url}/categories/merge",
                 params={
                     "telegram_id": telegram_id,
                     "source_name": source_name,
@@ -166,7 +166,7 @@ class APIClient:
         """Удалить категорию."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/categories/delete",
+                f"{self.base_url}/categories/delete",
                 params={"telegram_id": telegram_id, "name": name},
                 timeout=10.0,
             )
@@ -195,7 +195,7 @@ class APIClient:
                 "kind": kind,
             }
             resp = await client.post(
-                f"{self.base_url}/api/transactions",
+                f"{self.base_url}/transactions",
                 params={"telegram_id": telegram_id},
                 json=payload,
                 timeout=10.0,
@@ -207,7 +207,7 @@ class APIClient:
         """Разбор текста через ИИ + создание транзакции."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/transactions/parse-and-create",
+                f"{self.base_url}/transactions/parse-and-create",
                 params={"telegram_id": telegram_id},
                 json={"text": text},
                 timeout=30.0,
@@ -222,7 +222,7 @@ class APIClient:
         """
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/transactions/suggest-categories",
+                f"{self.base_url}/transactions/suggest-categories",
                 params={"telegram_id": telegram_id},
                 json={"text": text},
                 timeout=30.0,
@@ -234,7 +234,7 @@ class APIClient:
         """Получить последнюю транзакцию."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self.base_url}/api/transactions/last",
+                f"{self.base_url}/transactions/last",
                 params={"telegram_id": telegram_id},
                 timeout=10.0,
             )
@@ -245,7 +245,7 @@ class APIClient:
         """Удалить последнюю транзакцию."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/transactions/delete-last",
+                f"{self.base_url}/transactions/delete-last",
                 params={"telegram_id": telegram_id},
                 timeout=10.0,
             )
@@ -267,7 +267,7 @@ class APIClient:
 
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/transactions/edit-last",
+                f"{self.base_url}/transactions/edit-last",
                 params=params,
                 timeout=10.0,
             )
@@ -278,7 +278,7 @@ class APIClient:
         """Изменить категорию последней транзакции."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/transactions/set-category-last",
+                f"{self.base_url}/transactions/set-category-last",
                 params={
                     "telegram_id": telegram_id,
                     "category": category,
@@ -292,7 +292,7 @@ class APIClient:
         """Экспорт транзакций в CSV."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self.base_url}/api/transactions/export/csv",
+                f"{self.base_url}/transactions/export/csv",
                 params={"days": days, "telegram_id": telegram_id},
                 timeout=30.0,
             )
@@ -307,7 +307,7 @@ class APIClient:
         """Установить лимит бюджета."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/api/budget/set",
+                f"{self.base_url}/budget/set",
                 params={
                     "telegram_id": telegram_id,
                     "category_name": category_name,
@@ -322,7 +322,7 @@ class APIClient:
         """Получить статус бюджетов."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self.base_url}/api/budget/status",
+                f"{self.base_url}/budget/status",
                 params={"telegram_id": telegram_id},
                 timeout=10.0,
             )
@@ -341,7 +341,7 @@ class APIClient:
 
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self.base_url}/api/report/summary",
+                f"{self.base_url}/report/summary",
                 params=params,
                 timeout=10.0,
             )
@@ -356,7 +356,7 @@ class APIClient:
 
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self.base_url}/api/report/balance",
+                f"{self.base_url}/report/balance",
                 params=params,
                 timeout=10.0,
             )
@@ -367,7 +367,7 @@ class APIClient:
         """Отчёт по людям."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self.base_url}/api/report/members",
+                f"{self.base_url}/report/members",
                 params={"days": days, "telegram_id": telegram_id},
                 timeout=10.0,
             )
@@ -378,7 +378,7 @@ class APIClient:
         """Отчёт по магазинам."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self.base_url}/api/report/shops",
+                f"{self.base_url}/report/shops",
                 params={"telegram_id": telegram_id, "days": days},
                 timeout=10.0,
             )
@@ -406,7 +406,7 @@ class APIClient:
                 "next_run_at": None,
             }
             resp = await client.post(
-                f"{self.base_url}/api/reminders",
+                f"{self.base_url}/reminders",
                 params={"telegram_id": telegram_id},
                 json=payload,
                 timeout=10.0,
@@ -419,7 +419,7 @@ class APIClient:
         async with httpx.AsyncClient() as client:
             params = {"only_active": True, "telegram_id": telegram_id}
             resp = await client.get(
-                f"{self.base_url}/api/reminders",
+                f"{self.base_url}/reminders",
                 params=params,
                 timeout=10.0,
             )
@@ -431,7 +431,7 @@ class APIClient:
         async with httpx.AsyncClient() as client:
             params = {"telegram_id": telegram_id}
             resp = await client.get(
-                f"{self.base_url}/api/reminders/due-today",
+                f"{self.base_url}/reminders/due-today",
                 params=params,
                 timeout=10.0,
             )
@@ -446,7 +446,7 @@ class APIClient:
                 params["telegram_id"] = telegram_id
 
             resp = await client.post(
-                f"{self.base_url}/api/reminders/{reminder_id}/mark-paid",
+                f"{self.base_url}/reminders/{reminder_id}/mark-paid",
                 params=params,
                 timeout=10.0,
             )
