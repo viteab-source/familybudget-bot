@@ -32,15 +32,19 @@ class TransactionRead(TransactionBase):
     category_id: Optional[int] = None  # НОВОЕ: ссылка на категорию в БД
     merchant: Optional[str] = None     # НОВОЕ: магазин/сервис
     created_at: datetime
-    
+
     # Новое: данные по бюджету (если есть)
     budget_limit: Optional[float] = None
     budget_spent: Optional[float] = None
     budget_percent: Optional[float] = None
-    
+
     # Умные категории: топ-3 предложенных AI категории
     candidate_categories: Optional[List[str]] = None
 
+    # Поля для работы с опечатками / подсказками категорий
+    raw_category: Optional[str] = None          # исходный ввод пользователя
+    suggested_category: Optional[str] = None    # предложенная/исправленная категория
+    needs_confirmation: bool = False            # нужно ли спросить подтверждение у пользователя
 
 # -----------------------
 # AI И КАТЕГОРИИ
