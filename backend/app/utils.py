@@ -1,18 +1,30 @@
+# backend/app/utils.py
+
 """
 Вспомогательные функции для backend.
 """
+
+from difflib import SequenceMatcher
+from typing import Optional, Tuple
+
 import secrets
 import string
 from datetime import datetime
+
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
 from sqlalchemy import func
+from sqlalchemy.orm import Session
+
 from . import models
 
 
 # ==========================================
 # КОНСТАНТЫ
 # ==========================================
+
+# Пороги похожести категорий
+AUTO_FIX_THRESHOLD = 0.95   # >= 0.95 — считаем, что это просто опечатка, исправляем автоматически
+SUGGEST_THRESHOLD = 0.80    # 0.80–0.95 — спрашиваем у пользователя подтверждение
 
 INVITE_CODE_LENGTH = 8
 
@@ -37,13 +49,128 @@ MERCHANT_KEYWORDS = {
 
 
 # ==========================================
-# ФУНКЦИИ
+# РАБОТА С КАТЕГОРИЯМИ И ОПЕЧАТКАМИ
 # ==========================================
 
-def extract_merchant_from_text(text: str | None) -> str | None:
+def normalize_category_name(name: str) -> str:
+    """
+    Приводим название категории к каноническому виду:
+    - обрезаем пробелы в начале/конце;
+    - переводим в нижний регистр;
+    - схлопываем повторяющиеся пробелы.
+    """
+    return " ".join(name.strip().lower().split())
+
+
+def find_similar_category(
+    db: Session,
+    household_id: int,
+    raw_name: str,
+) -> Tuple[Optional[models.Category], float]:
+    """
+    Ищет самую похожую категорию для raw_name внутри одного household.
+
+    Возвращает:
+        (Category | None, similarity_score от 0.0 до 1.0)
+
+    similarity_score — результат SequenceMatcher, чем ближе к 1.0, тем строки более похожи.
+    """
+    normalized = normalize_category_name(raw_name)
+    if not normalized:
+        return None, 0.0
+
+    categories = (
+        db.query(models.Category)
+        .filter(models.Category.household_id == household_id)
+        .all()
+    )
+
+    best_category: Optional[models.Category] = None
+    best_score: float = 0.0
+
+    for category in categories:
+        cat_norm = normalize_category_name(category.name)
+        score = SequenceMatcher(None, normalized, cat_norm).ratio()
+        if score > best_score:
+            best_score = score
+            best_category = category
+
+    return best_category, best_score
+
+
+def resolve_category_with_typos(
+    db: Session,
+    household_id: int,
+    raw_name: str,
+    force_new: bool = False,
+) -> Tuple[models.Category, Optional[str], bool]:
+    """
+    Возвращает кортеж:
+        applied_category  — категорию, которую реально используем в транзакции;
+        original_name     — исходное имя, если оно отличается от applied_category.name
+                            (например, пользователь ввёл с опечаткой);
+        needs_confirmation — нужно ли спросить пользователя
+                             «Похоже, ты имел в виду ... ?».
+
+    force_new=True — принудительно создать новую категорию с raw_name,
+    не пытаясь искать похожие (нужно для кнопки «Оставить "Такиси"»).
+    """
+    raw_name = raw_name.strip()
+    normalized = normalize_category_name(raw_name)
+
+    # 0. Если просили насильно создать новую категорию — делаем и выходим
+    if force_new:
+        new_cat = models.Category(
+            household_id=household_id,
+            name=raw_name,
+        )
+        db.add(new_cat)
+        db.flush()
+        return new_cat, None, False
+
+    # 1. Пробуем точное совпадение (без учёта регистра)
+    existing = (
+        db.query(models.Category)
+        .filter(
+            models.Category.household_id == household_id,
+            func.lower(models.Category.name) == normalized,
+        )
+        .first()
+    )
+    if existing:
+        # Никаких опечаток, просто используем категорию
+        return existing, None, False
+
+    # 2. Ищем похожую категорию
+    similar_category, score = find_similar_category(db, household_id, raw_name)
+
+    if similar_category is None or score < SUGGEST_THRESHOLD:
+        # Ничего похожего — создаём новую категорию
+        new_cat = models.Category(
+            household_id=household_id,
+            name=raw_name,
+        )
+        db.add(new_cat)
+        db.flush()
+        return new_cat, None, False
+
+    # 3. Очень сильное совпадение — автоисправление без вопроса
+    if score >= AUTO_FIX_THRESHOLD:
+        # applied = похожая, но помним, что пользователь вводил raw_name
+        return similar_category, raw_name, False
+
+    # 4. Среднее совпадение — предлагаем пользователю подтвердить
+    return similar_category, raw_name, True
+
+
+# ==========================================
+# ПРОЧИЕ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ==========================================
+
+def extract_merchant_from_text(text: Optional[str]) -> Optional[str]:
     """
     Извлекает название магазина из текста.
-    
+
     Примеры:
     - "Пятёрочка продукты 500р" → "Пятёрочка"
     - "wb одежда" → "Wildberries"
@@ -62,7 +189,7 @@ def generate_invite_code(db: Session, length: int = INVITE_CODE_LENGTH) -> str:
     """
     Генерирует уникальный короткий код приглашения.
     Использует заглавные буквы и цифры (кроме похожих O0I1).
-    
+
     Пример: "AB7K3F"
     """
     # Базовый алфавит: A-Z + 0-9
@@ -99,7 +226,7 @@ def attach_budget_info_to_tx(
     - budget_limit — лимит по категории на месяц
     - budget_spent — сколько уже потрачено
     - budget_percent — процент использования бюджета
-    
+
     Работает только для расходов (kind="expense").
     """
     # Только для расходов и только если есть категория
@@ -157,7 +284,7 @@ def attach_budget_info_to_tx(
 def format_amount(amount: float, currency: str = "RUB") -> str:
     """
     Форматирует сумму с разделителями.
-    
+
     Примеры:
     - 123456.78 → "123 457 RUB"
     - 1500.0 → "1 500 RUB"
