@@ -16,9 +16,60 @@ from ..db import get_db
 from ..deps import get_or_create_user_and_household
 from ..utils import attach_budget_info_to_tx, extract_merchant_from_text
 from ..ai import parse_text_to_transaction
+import difflib  
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# ==========================================
+# Вспомогательные функции
+# ==========================================
+
+def find_similar_category(db: Session, household_id: int, raw_name: str) -> str | None:
+    """
+    Ищет похожую категорию по уже существующим в семье.
+    Возвращает имя существующей категории, если нашлась достаточно похожая.
+    Иначе None.
+
+    Простая логика:
+    - сравнение по SequenceMatcher из difflib
+    - порог похожести 0.8
+    """
+    name = (raw_name or "").strip()
+    if not name:
+        return None
+
+    # Берём только более-менее осмысленные строки
+    if len(name) < 3:
+        return None
+
+    # Приводим к нижнему регистру для сравнения
+    name_lower = name.lower()
+
+    categories = (
+        db.query(models.Category)
+        .filter(models.Category.household_id == household_id)
+        .all()
+    )
+
+    best_match = None
+    best_ratio = 0.0
+
+    for cat in categories:
+        cat_lower = (cat.name or "").lower()
+        if not cat_lower:
+            continue
+
+        ratio = difflib.SequenceMatcher(a=name_lower, b=cat_lower).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_match = cat.name
+
+    # Порог похожести — эмпирически 0.8 достаточно, чтобы ловить "Такиси" -> "Такси"
+    if best_match and best_ratio >= 0.8:
+        return best_match
+
+    return None
 
 
 @router.post("", response_model=schemas.TransactionRead)
@@ -53,30 +104,46 @@ def create_transaction(
             detail="kind должен быть 'expense' или 'income'",
         )
     
-    # Ищем или создаём категорию
+    # Ищем или создаём категорию с учётом опечаток
     category_id = None
     if tx.category:
-        cat_name = tx.category.strip()
+        raw_name = tx.category.strip()
+
+        # 1) Сначала пробуем найти точное совпадение по имени
         category = (
             db.query(models.Category)
             .filter(
                 models.Category.household_id == household.id,
-                models.Category.name == cat_name,
+                models.Category.name == raw_name,
             )
             .first()
         )
-        
+
+        # 2) Если точного совпадения нет — пробуем найти похожую категорию
+        if not category:
+            similar_name = find_similar_category(db, household.id, raw_name)
+            if similar_name:
+                category = (
+                    db.query(models.Category)
+                    .filter(
+                        models.Category.household_id == household.id,
+                        models.Category.name == similar_name,
+                    )
+                    .first()
+                )
+
+        # 3) Если ни точной, ни похожей не нашли — создаём новую категорию
         if not category:
             category = models.Category(
                 household_id=household.id,
-                name=cat_name,
+                name=raw_name,
             )
             db.add(category)
             db.commit()
             db.refresh(category)
-        
+
         category_id = category.id
-    
+
     # Определяем merchant (магазин)
     merchant = extract_merchant_from_text(tx.description)
     
