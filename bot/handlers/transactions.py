@@ -168,10 +168,17 @@ async def process_add_description(message: types.Message, state: FSMContext):
     await message.answer("🏷 Введи категорию (или '-' чтобы пропустить):")
     await state.set_state(AddTransactionStates.waiting_for_category)
 
-
 @router.message(AddTransactionStates.waiting_for_category)
 async def process_add_category(message: types.Message, state: FSMContext):
-    """Обработка категории и создание транзакции."""
+    """
+    Обработка категории и создание транзакции.
+
+    Новое:
+    - если бэкенд нашёл опечатку и вернул suggested_category + needs_confirmation = True,
+      показываем пользователю уточнение «Такси / Такиси?» с кнопками.
+    """
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
     category = message.text.strip()
     if category == "-":
         category = None
@@ -183,6 +190,7 @@ async def process_add_category(message: types.Message, state: FSMContext):
     telegram_id = message.from_user.id
 
     try:
+        # 1. Создаём транзакцию на бэке
         tx = await api.create_transaction(
             telegram_id=telegram_id,
             amount=amount,
@@ -190,13 +198,62 @@ async def process_add_category(message: types.Message, state: FSMContext):
             category=category,
             kind="expense",
         )
+
+        # 2. Показываем обычное подтверждение расхода
         text = "✅ Расход добавлен:\n\n" + format_transaction(tx)
         await message.answer(text, parse_mode="HTML")
+
+        # 3. Проверяем, не попросил ли бэкенд уточнить категорию
+        raw_category = tx.get("raw_category")
+        suggested_category = tx.get("suggested_category")
+        needs_confirmation = tx.get("needs_confirmation", False)
+        tx_id = tx.get("id")
+
+        if (
+            needs_confirmation
+            and raw_category
+            and suggested_category
+            and raw_category != suggested_category
+        ):
+            # Сохраняем данные в состояние — пригодятся в callback'е
+            await state.update_data(
+                raw_category=raw_category,
+                backend_category=suggested_category,
+                tx_id=tx_id,
+            )
+
+            question_text = (
+                f"🤔 Похоже, ты имел в виду «{suggested_category}», а не «{raw_category}».\n"
+                f"Как сохранить?"
+            )
+
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=f"✅ {suggested_category}",
+                            callback_data="catfix_accept_backend",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text=f"Оставить «{raw_category}»",
+                            callback_data="catfix_keep_raw",
+                        )
+                    ],
+                ]
+            )
+
+            # Переключаемся в состояние ожидания подтверждения
+            await state.set_state(SetCategoryStates.waiting_for_correction_confirm)
+            await message.answer(question_text, reply_markup=kb)
+        else:
+            # Если подтверждение не нужно — просто выходим из FSM
+            await state.clear()
+
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
-
-    await state.clear()
-
+        await state.clear()
 
 # ==========================================
 # /income — добавить доход
