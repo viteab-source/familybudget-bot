@@ -19,7 +19,7 @@ async def log_category_feedback(telegram_id: int, selected_category: str, transa
     Отправляет данные на backend /api/categories/feedback
     """
     try:
-        url = f"{API_BASE_URL}/categories/feedback"
+        url = f"{API_BASE_URL}/api/categories/feedback"
         params = {"telegram_id": telegram_id}
         payload = {
             "transaction_id": transaction_id,
