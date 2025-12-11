@@ -278,27 +278,41 @@ async def process_aiadd(message: types.Message, state: FSMContext):
         
         await processing_msg.delete()
         
-        text = "✅ Расход добавлен (ИИ):\n\n" + format_transaction(tx)
-        
-        # Предложить другие категории
-        category = tx.get("category")
-        if category:
-            categories = await api.get_categories(telegram_id)
-            other_cats = [c["name"] for c in categories if c["name"] != category][:5]
+        result_text = "✅ Расход добавлен (ИИ):\n\n" + format_transaction(tx)
+
+        # Показываем inline кнопки с альтернативными категориями от AI
+        selected_category = tx.get("category", "Без категории")
+        candidate_cats = tx.get("candidate_categories", [])
+
+        if candidate_cats:
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
             
-            if other_cats:
-                text += "\n\n💡 Или выбери другую категорию:"
-                kb = types.ReplyKeyboardMarkup(
-                    keyboard=[[types.KeyboardButton(text=c)] for c in other_cats],
-                    resize_keyboard=True,
-                    one_time_keyboard=True,
+            buttons = []
+            # Показываем топ-3 категории от AI (исключая уже выбранную)
+            for cat in candidate_cats:
+                if cat != selected_category:
+                    buttons.append([
+                        InlineKeyboardButton(
+                            text=f"📂 {cat}",
+                            callback_data=f"setcat_{cat}"
+                        )
+                    ])
+            
+            # Кнопка "Другая категория"
+            buttons.append([
+                InlineKeyboardButton(
+                    text="✏️ Другая категория",
+                    callback_data="setcat_custom"
                 )
-                await message.answer(text, parse_mode="HTML", reply_markup=kb)
-                await state.clear()
-                return
-        
-        await message.answer(text, parse_mode="HTML")
-        
+            ])
+            
+            kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+            result_text += f"\n\n💡 Категория: {selected_category}\nИли выбери другую:"
+            await message.answer(result_text, parse_mode="HTML", reply_markup=kb)
+        else:
+            # Если нет альтернатив - просто показываем результат
+            await message.answer(result_text, parse_mode="HTML")
+     
     except Exception as e:
         await processing_msg.delete()
         await message.answer(f"❌ Ошибка: {e}")
@@ -338,19 +352,17 @@ async def handle_plain_text(message: types.Message, state: FSMContext):
         
         result_text = "✅ Добавлено:\n\n" + format_transaction(tx)
         
-        # Показываем inline кнопки с категориями
+        # Показываем кнопки с альтернативными категориями от AI
+        selected_category = tx.get("category", "Без категории")
         candidate_cats = tx.get("candidate_categories", [])
-        
-        if candidate_cats and len(candidate_cats) >= 2:
+
+        if candidate_cats:
             from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
             
-            # Первая категория (основная) - уже выбрана
-            main_cat = candidate_cats[0]
-            
-            # Альтернативные категории (2 и 3)
             buttons = []
-            for cat in candidate_cats[1:]:
-                if cat != main_cat:
+            # Показываем топ-3 категории от AI (исключая уже выбранную)
+            for cat in candidate_cats:
+                if cat != selected_category:
                     buttons.append([
                         InlineKeyboardButton(
                             text=f"📂 {cat}",
@@ -367,19 +379,11 @@ async def handle_plain_text(message: types.Message, state: FSMContext):
             ])
             
             kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-            
-            result_text += f"\n\n💡 Верная категория <b>{main_cat}</b>?\nИли выбери другую:"
-            
+            result_text += f"\n\n💡 Категория: {selected_category}\nИли выбери другую:"
             await message.answer(result_text, parse_mode="HTML", reply_markup=kb)
         else:
-            # Если нет кандидатов - просто показываем результат
+            # Если нет альтернатив - просто показываем результат
             await message.answer(result_text, parse_mode="HTML")
-        
-    except Exception as e:
-        await processing_msg.delete()
-        await message.answer(f"❌ Не удалось обработать. Попробуй:\n\"Магнит 500\" или \"Такси 350\"")
-
-
 
 # ==========================================
 # Обработчик смены категории (inline кнопки)
